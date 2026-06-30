@@ -1,26 +1,52 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "github-issue-agent"
+name = "issue-to-patch"
 version = "0.1.0"
 description = "Local-first CLI agent for solving Python GitHub issues with patch/test/repair loops."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
-authors = [{ name = "Codex" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "kwakhyun" }]
+keywords = ["github", "issues", "cli", "agent", "patch", "swe-bench", "llm"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Bug Tracking",
+  "Topic :: Software Development :: Testing",
+]
 dependencies = []
 
 [project.optional-dependencies]
+yaml = [
+  "PyYAML>=6",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
   "mypy>=1.10",
+  "build>=1.2",
+  "twine>=5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kwakhyun/issue-to-patch"
+Repository = "https://github.com/kwakhyun/issue-to-patch"
+Issues = "https://github.com/kwakhyun/issue-to-patch/issues"
 
 [project.scripts]
 gia = "issue_agent.cli:main"
+
+[tool.setuptools.package-data]
+issue_agent = ["py.typed"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -37,3 +63,8 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true

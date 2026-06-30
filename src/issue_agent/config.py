@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .errors import ConfigError
 
@@ -16,6 +16,19 @@ class ProviderConfig:
     api_key_env: str | None = None
     input_cost_per_1m: float = 0.0
     output_cost_per_1m: float = 0.0
+
+
+ConfigIssueSeverity = Literal["error", "warn"]
+
+
+@dataclass(frozen=True)
+class ConfigIssue:
+    severity: ConfigIssueSeverity
+    path: str
+    message: str
+
+    def to_json(self) -> dict[str, str]:
+        return {"severity": self.severity, "path": self.path, "message": self.message}
 
 
 @dataclass(frozen=True)
@@ -57,6 +70,39 @@ class Config:
         if not name:
             return None
         return self.providers.get(name)
+
+
+SAMPLE_CONFIG = """providers:
+  triage:
+    base_url: http://localhost:11434/v1
+    model: qwen3:4b
+    role: triage
+  coder:
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    role: coder
+  # Optional external fallback. Uncomment and set api_key_env only when you
+  # explicitly want network fallback outside your local models.
+  # fallback:
+  #   base_url: https://api.example.com/v1
+  #   api_key_env: EXTERNAL_API_KEY
+  #   model: fallback-coder
+  #   role: fallback
+router:
+  triage_model: triage
+  coder_model: coder
+  fallback_model: null
+checks:
+  commands:
+    - python -m pytest
+    - ruff check .
+  mypy_enabled: false
+  timeout_seconds: 600
+sandbox:
+  default: local
+  docker_image: python:3.11
+  docker_workdir: /workspace
+"""
 
 
 def default_config() -> Config:
@@ -141,6 +187,72 @@ def config_from_mapping(data: dict[str, Any], base: Config | None = None) -> Con
             raise ConfigError("sandbox.default must be 'local' or 'docker'")
 
     return Config(providers=providers, router=router, checks=checks, sandbox=sandbox)
+
+
+def sample_config_text() -> str:
+    return SAMPLE_CONFIG
+
+
+def validate_config(config: Config) -> list[ConfigIssue]:
+    issues: list[ConfigIssue] = []
+    provider_names = set(config.providers)
+
+    for router_field, provider_name in [
+        ("triage_model", config.router.triage_model),
+        ("coder_model", config.router.coder_model),
+    ]:
+        if provider_name not in provider_names:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"router.{router_field}",
+                    f"provider '{provider_name}' is not defined",
+                )
+            )
+
+    if config.router.fallback_model and config.router.fallback_model not in provider_names:
+        issues.append(
+            ConfigIssue(
+                "error",
+                "router.fallback_model",
+                f"provider '{config.router.fallback_model}' is not defined",
+            )
+        )
+
+    for name, provider in sorted(config.providers.items()):
+        if not provider.base_url:
+            issues.append(
+                ConfigIssue("error", f"providers.{name}.base_url", "base_url is required")
+            )
+        if not provider.model:
+            issues.append(ConfigIssue("error", f"providers.{name}.model", "model is required"))
+        if provider.input_cost_per_1m < 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.input_cost_per_1m",
+                    "cost must be non-negative",
+                )
+            )
+        if provider.output_cost_per_1m < 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.output_cost_per_1m",
+                    "cost must be non-negative",
+                )
+            )
+
+    if not config.checks.commands:
+        issues.append(ConfigIssue("warn", "checks.commands", "no validation commands configured"))
+    if config.checks.timeout_seconds <= 0:
+        issues.append(ConfigIssue("error", "checks.timeout_seconds", "timeout must be positive"))
+    if config.sandbox.default not in {"local", "docker"}:
+        issues.append(ConfigIssue("error", "sandbox.default", "must be 'local' or 'docker'"))
+    if not config.sandbox.docker_image:
+        issues.append(ConfigIssue("warn", "sandbox.docker_image", "docker sandbox has no image"))
+
+    return issues
 
 
 def _provider_from_mapping(

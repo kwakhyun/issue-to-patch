@@ -1,4 +1,4 @@
-from issue_agent.config import config_from_mapping, load_config
+from issue_agent.config import config_from_mapping, load_config, sample_config_text, validate_config
 
 
 def test_load_config_defaults(tmp_path):
@@ -56,3 +56,23 @@ checks:
 
     assert config.providers["coder"].model == "local-coder"
     assert config.checks.commands == ("python -m pytest -q",)
+
+
+def test_sample_config_text_is_loadable(tmp_path):
+    path = tmp_path / ".gia.yaml"
+    path.write_text(sample_config_text(), encoding="utf-8")
+
+    config = load_config(tmp_path)
+
+    assert config.router.fallback_model is None
+    assert config.sandbox.docker_workdir == "/workspace"
+    assert validate_config(config) == []
+
+
+def test_validate_config_reports_missing_provider():
+    config = config_from_mapping({"router": {"coder_model": "missing"}})
+
+    issues = validate_config(config)
+
+    assert any(issue.severity == "error" for issue in issues)
+    assert any(issue.path == "router.coder_model" for issue in issues)

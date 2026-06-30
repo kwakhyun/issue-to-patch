@@ -1,16 +1,37 @@
-# GitHub Issue Agent
+# issue-to-patch
 
-`gia` is a local-first Python CLI scaffold for solving GitHub issues in Python
-repositories. It protects the target repository by creating an isolated git
-worktree, asks OpenAI-compatible model backends for unified diffs, applies and
-tests patches, then records run metadata for benchmark and leaderboard use.
+`issue-to-patch` provides `gia`, a local-first Python CLI agent for turning
+GitHub issues into reviewed, tested git patches.
+
+It protects the target repository by creating an isolated git worktree, asks
+OpenAI-compatible model backends for unified diffs, applies and tests patches,
+then records run metadata for benchmark and leaderboard use.
+
+## Status
+
+This project is alpha-quality open source infrastructure. The CLI surface is
+usable for local experiments, but generated patches should still be reviewed
+before they are trusted.
 
 ## Install
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,yaml]"
+```
+
+Check your local setup:
+
+```bash
+gia doctor --repo /path/to/python/repo
+gia config validate --repo /path/to/python/repo
+```
+
+Create a starter config:
+
+```bash
+gia init-config --repo /path/to/python/repo
 ```
 
 ## Solve an issue
@@ -27,6 +48,9 @@ gia solve \
 
 Issue input can be a GitHub issue URL, a local markdown/json file, or inline
 text. GitHub URLs use `gh issue view` when the GitHub CLI is available.
+
+Use `--sandbox docker` to run validation commands in a Docker container. Local
+mode is the default and is recorded explicitly in run metadata.
 
 ## Configure models and checks
 
@@ -50,7 +74,7 @@ providers:
 router:
   triage_model: triage
   coder_model: coder
-  fallback_model: fallback
+  fallback_model: null
 checks:
   commands:
     - python -m pytest
@@ -60,6 +84,9 @@ sandbox:
   default: local
   docker_image: python:3.11
 ```
+
+External fallback providers are opt-in. Keep `fallback_model: null` until you
+explicitly want network fallback outside your local model stack.
 
 ## Benchmarks
 
@@ -73,3 +100,15 @@ The SWE-bench command writes prediction JSONL compatible with the official
 harness shape (`instance_id`, `model_name_or_path`, `model_patch`). It does not
 replace the official Docker evaluation harness.
 
+## Development
+
+```bash
+python -m pytest
+ruff check .
+ruff format --check .
+mypy src
+python -m build
+twine check dist/*
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/usage.md](docs/usage.md).

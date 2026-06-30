@@ -1,4 +1,10 @@
-from issue_agent.config import config_from_mapping, load_config, sample_config_text, validate_config
+from issue_agent.config import (
+    available_config_presets,
+    config_from_mapping,
+    load_config,
+    sample_config_text,
+    validate_config,
+)
 
 
 def test_load_config_defaults(tmp_path):
@@ -16,6 +22,9 @@ def test_config_from_mapping_overrides_nested_values():
                 "coder": {
                     "base_url": "http://localhost:9999/v1",
                     "model": "kimi-coder",
+                    "timeout_seconds": 33,
+                    "max_retries": 2,
+                    "retry_backoff_seconds": 0.25,
                     "input_cost_per_1m": 1.0,
                 },
                 "fallback": {
@@ -30,6 +39,9 @@ def test_config_from_mapping_overrides_nested_values():
     )
 
     assert config.providers["coder"].base_url == "http://localhost:9999/v1"
+    assert config.providers["coder"].timeout_seconds == 33
+    assert config.providers["coder"].max_retries == 2
+    assert config.providers["coder"].retry_backoff_seconds == 0.25
     assert config.providers["coder"].input_cost_per_1m == 1.0
     assert config.router.fallback_model == "fallback"
     assert config.checks.enabled_commands() == ("python -m pytest -q", "mypy .")
@@ -69,6 +81,16 @@ def test_sample_config_text_is_loadable(tmp_path):
     assert validate_config(config) == []
 
 
+def test_all_config_presets_are_loadable(tmp_path):
+    for preset in available_config_presets():
+        path = tmp_path / f"{preset}.yaml"
+        path.write_text(sample_config_text(preset), encoding="utf-8")
+
+        config = load_config(tmp_path, path)
+
+        assert validate_config(config) == []
+
+
 def test_validate_config_reports_missing_provider():
     config = config_from_mapping({"router": {"coder_model": "missing"}})
 
@@ -76,3 +98,23 @@ def test_validate_config_reports_missing_provider():
 
     assert any(issue.severity == "error" for issue in issues)
     assert any(issue.path == "router.coder_model" for issue in issues)
+
+
+def test_validate_config_reports_bad_provider_runtime_values():
+    config = config_from_mapping(
+        {
+            "providers": {
+                "coder": {
+                    "timeout_seconds": 0,
+                    "max_retries": -1,
+                    "retry_backoff_seconds": -0.1,
+                }
+            }
+        }
+    )
+
+    issues = validate_config(config)
+
+    assert any(issue.path == "providers.coder.timeout_seconds" for issue in issues)
+    assert any(issue.path == "providers.coder.max_retries" for issue in issues)
+    assert any(issue.path == "providers.coder.retry_backoff_seconds" for issue in issues)

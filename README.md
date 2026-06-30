@@ -32,6 +32,7 @@ Create a starter config:
 
 ```bash
 gia init-config --repo /path/to/python/repo
+gia init-config --repo /path/to/python/repo --preset ollama
 ```
 
 ## Solve an issue
@@ -52,6 +53,12 @@ text. GitHub URLs use `gh issue view` when the GitHub CLI is available.
 Use `--sandbox docker` to run validation commands in a Docker container. Local
 mode is the default and is recorded explicitly in run metadata.
 
+By default, `gia solve` refuses to run when the target repository has
+uncommitted changes. Pass `--allow-dirty` only when you intentionally want to
+solve against the current `HEAD` while preserving unrelated local edits outside
+the isolated worktree. Every generated patch is dry-run checked with
+`git apply --check` before it is applied.
+
 ## Configure models and checks
 
 Create `.gia.yaml` in the target repository:
@@ -62,15 +69,19 @@ providers:
     base_url: http://localhost:11434/v1
     model: qwen3:4b
     role: triage
+    timeout_seconds: 60
+    max_retries: 1
   coder:
     base_url: http://localhost:8000/v1
     model: Qwen/Qwen3-Coder-30B-A3B-Instruct
     role: coder
-  fallback:
-    base_url: https://api.example.com/v1
-    api_key_env: EXTERNAL_API_KEY
-    model: fallback-coder
-    role: fallback
+    timeout_seconds: 120
+    max_retries: 1
+  # fallback:
+  #   base_url: https://api.example.com/v1
+  #   api_key_env: EXTERNAL_API_KEY
+  #   model: fallback-coder
+  #   role: fallback
 router:
   triage_model: triage
   coder_model: coder
@@ -83,10 +94,18 @@ checks:
 sandbox:
   default: local
   docker_image: python:3.11
+  docker_workdir: /workspace
 ```
 
 External fallback providers are opt-in. Keep `fallback_model: null` until you
 explicitly want network fallback outside your local model stack.
+
+Available config presets:
+
+- `local`: Ollama for triage and vLLM for coding.
+- `ollama`: Ollama-compatible local models for both roles.
+- `vllm`: vLLM OpenAI-compatible server for both roles.
+- `openai-compatible`: generic external OpenAI-compatible provider template.
 
 ## Benchmarks
 
@@ -112,3 +131,6 @@ twine check dist/*
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/usage.md](docs/usage.md).
+
+Tagged releases matching `v*` build wheel/sdist artifacts and attach them to a
+GitHub Release.

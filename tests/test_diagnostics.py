@@ -55,7 +55,7 @@ def test_doctor_model_probe(monkeypatch, tmp_path):
 
     def fake_urlopen(request: urllib.request.Request, timeout: int):
         assert request.full_url.endswith("/models")
-        assert timeout == 5
+        assert timeout == 10
         return FakeHTTPResponse()
 
     monkeypatch.setattr("issue_agent.diagnostics.urllib.request.urlopen", fake_urlopen)

@@ -217,7 +217,9 @@ def _model_probe_checks(config: Config) -> list[DiagnosticCheck]:
             method="GET",
         )
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with urllib.request.urlopen(
+                request, timeout=min(provider.timeout_seconds, 10)
+            ) as response:
                 status = getattr(response, "status", 200)
         except urllib.error.URLError as exc:
             checks.append(DiagnosticCheck(f"model:{name}", "warn", f"probe failed: {exc}"))

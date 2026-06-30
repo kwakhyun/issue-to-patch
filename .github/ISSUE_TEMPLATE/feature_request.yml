@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a capability or improvement.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the CLI/API/user experience you want.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - solve loop
+        - model providers
+        - config
+        - benchmarks
+        - packaging/release
+        - documentation
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+

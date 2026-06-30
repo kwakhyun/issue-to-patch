@@ -4,11 +4,14 @@
 
 ```bash
 gia init-config --repo /path/to/repo
+gia init-config --repo /path/to/repo --preset vllm
 ```
 
 This writes `.gia.yaml` with local Ollama/vLLM defaults and safe check settings.
 The repo path must already exist and be a git repository; `gia` will not create
 directories from a mistyped path.
+
+Available presets are `local`, `ollama`, `vllm`, and `openai-compatible`.
 
 ## Validate config
 
@@ -46,6 +49,11 @@ gia solve \
 Use `--diff-only` to request a patch without applying it in the isolated
 worktree. Use `--sandbox docker` for test execution in Docker.
 
+`gia solve` refuses dirty target repositories by default. Use `--allow-dirty`
+only when the current uncommitted changes are unrelated and you still want GIA
+to build an isolated worktree from `HEAD`. Patch attempts include failure-stage
+metadata and pass `git apply --check` before application.
+
 ## Leaderboard
 
 ```bash
@@ -55,3 +63,9 @@ gia leaderboard --runs runs.jsonl --json
 
 Local zero-cost runs are reported separately from paid resolved-per-dollar
 scores.
+
+## Release
+
+Push a tag such as `v0.1.0` to run the release workflow. The workflow builds the
+source distribution and wheel, checks package metadata, and attaches artifacts
+to a GitHub Release.

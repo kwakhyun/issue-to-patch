@@ -14,6 +14,9 @@ class ProviderConfig:
     model: str
     role: str = "coder"
     api_key_env: str | None = None
+    timeout_seconds: int = 120
+    max_retries: int = 0
+    retry_backoff_seconds: float = 1.0
     input_cost_per_1m: float = 0.0
     output_cost_per_1m: float = 0.0
 
@@ -72,15 +75,19 @@ class Config:
         return self.providers.get(name)
 
 
-SAMPLE_CONFIG = """providers:
+LOCAL_CONFIG = """providers:
   triage:
     base_url: http://localhost:11434/v1
     model: qwen3:4b
     role: triage
+    timeout_seconds: 60
+    max_retries: 1
   coder:
     base_url: http://localhost:8000/v1
     model: Qwen/Qwen3-Coder-30B-A3B-Instruct
     role: coder
+    timeout_seconds: 120
+    max_retries: 1
   # Optional external fallback. Uncomment and set api_key_env only when you
   # explicitly want network fallback outside your local models.
   # fallback:
@@ -103,6 +110,96 @@ sandbox:
   docker_image: python:3.11
   docker_workdir: /workspace
 """
+
+OLLAMA_CONFIG = """providers:
+  triage:
+    base_url: http://localhost:11434/v1
+    model: qwen3:4b
+    role: triage
+    timeout_seconds: 60
+    max_retries: 1
+  coder:
+    base_url: http://localhost:11434/v1
+    model: qwen3-coder:latest
+    role: coder
+    timeout_seconds: 120
+    max_retries: 1
+router:
+  triage_model: triage
+  coder_model: coder
+  fallback_model: null
+checks:
+  commands:
+    - python -m pytest
+    - ruff check .
+  mypy_enabled: false
+  timeout_seconds: 600
+sandbox:
+  default: local
+  docker_image: python:3.11
+  docker_workdir: /workspace
+"""
+
+VLLM_CONFIG = """providers:
+  triage:
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen3-4B-Instruct
+    role: triage
+    timeout_seconds: 60
+    max_retries: 1
+  coder:
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+    role: coder
+    timeout_seconds: 120
+    max_retries: 1
+router:
+  triage_model: triage
+  coder_model: coder
+  fallback_model: null
+checks:
+  commands:
+    - python -m pytest
+    - ruff check .
+  mypy_enabled: false
+  timeout_seconds: 600
+sandbox:
+  default: local
+  docker_image: python:3.11
+  docker_workdir: /workspace
+"""
+
+OPENAI_COMPATIBLE_CONFIG = """providers:
+  coder:
+    base_url: https://api.example.com/v1
+    api_key_env: OPENAI_COMPATIBLE_API_KEY
+    model: your-coder-model
+    role: coder
+    timeout_seconds: 120
+    max_retries: 2
+    retry_backoff_seconds: 1.5
+router:
+  triage_model: coder
+  coder_model: coder
+  fallback_model: null
+checks:
+  commands:
+    - python -m pytest
+    - ruff check .
+  mypy_enabled: false
+  timeout_seconds: 600
+sandbox:
+  default: local
+  docker_image: python:3.11
+  docker_workdir: /workspace
+"""
+
+CONFIG_PRESETS = {
+    "local": LOCAL_CONFIG,
+    "ollama": OLLAMA_CONFIG,
+    "vllm": VLLM_CONFIG,
+    "openai-compatible": OPENAI_COMPATIBLE_CONFIG,
+}
 
 
 def default_config() -> Config:
@@ -189,8 +286,18 @@ def config_from_mapping(data: dict[str, Any], base: Config | None = None) -> Con
     return Config(providers=providers, router=router, checks=checks, sandbox=sandbox)
 
 
-def sample_config_text() -> str:
-    return SAMPLE_CONFIG
+def available_config_presets() -> tuple[str, ...]:
+    return tuple(CONFIG_PRESETS)
+
+
+def sample_config_text(preset: str = "local") -> str:
+    try:
+        return CONFIG_PRESETS[preset]
+    except KeyError as exc:
+        options = ", ".join(available_config_presets())
+        raise ConfigError(
+            f"Unknown config preset '{preset}'. Available presets: {options}"
+        ) from exc
 
 
 def validate_config(config: Config) -> list[ConfigIssue]:
@@ -226,6 +333,30 @@ def validate_config(config: Config) -> list[ConfigIssue]:
             )
         if not provider.model:
             issues.append(ConfigIssue("error", f"providers.{name}.model", "model is required"))
+        if provider.timeout_seconds <= 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.timeout_seconds",
+                    "timeout must be positive",
+                )
+            )
+        if provider.max_retries < 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.max_retries",
+                    "max_retries must be non-negative",
+                )
+            )
+        if provider.retry_backoff_seconds < 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.retry_backoff_seconds",
+                    "retry backoff must be non-negative",
+                )
+            )
         if provider.input_cost_per_1m < 0:
             issues.append(
                 ConfigIssue(
@@ -266,6 +397,9 @@ def _provider_from_mapping(
         model=str(data.get("model", base.model)),
         role=str(data.get("role", base.role)),
         api_key_env=_optional_str(data.get("api_key_env", base.api_key_env)),
+        timeout_seconds=int(data.get("timeout_seconds", base.timeout_seconds)),
+        max_retries=int(data.get("max_retries", base.max_retries)),
+        retry_backoff_seconds=float(data.get("retry_backoff_seconds", base.retry_backoff_seconds)),
         input_cost_per_1m=float(data.get("input_cost_per_1m", base.input_cost_per_1m)),
         output_cost_per_1m=float(data.get("output_cost_per_1m", base.output_cost_per_1m)),
     )

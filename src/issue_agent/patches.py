@@ -36,8 +36,23 @@ def validate_unified_diff(diff: str) -> str:
     return normalized + "\n"
 
 
-def apply_unified_diff(repo: str | Path, diff: str) -> None:
+def check_unified_diff(repo: str | Path, diff: str) -> None:
     validate_unified_diff(diff)
+    result = subprocess.run(
+        ["git", "apply", "--check", "--whitespace=fix", "-"],
+        cwd=Path(repo),
+        input=diff,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise PatchError(f"git apply --check failed: {message}")
+
+
+def apply_unified_diff(repo: str | Path, diff: str) -> None:
+    check_unified_diff(repo, diff)
     result = subprocess.run(
         ["git", "apply", "--whitespace=fix", "-"],
         cwd=Path(repo),
@@ -48,7 +63,7 @@ def apply_unified_diff(repo: str | Path, diff: str) -> None:
     )
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip()
-        raise PatchError(f"git apply failed: {message}")
+        raise PatchError(f"git apply failed after successful dry-run: {message}")
 
 
 def _strip_markdown_fences(text: str) -> str:

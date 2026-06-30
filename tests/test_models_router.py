@@ -1,4 +1,5 @@
 import json
+import urllib.error
 
 from issue_agent.config import ProviderConfig
 from issue_agent.issue import Issue
@@ -47,7 +48,38 @@ def test_openai_compatible_client_shapes_request(monkeypatch):
 
     assert captured["url"] == "http://localhost:8000/v1/chat/completions"
     assert captured["payload"]["model"] == "coder-model"
+    assert captured["timeout"] == 120
     assert response.cost_usd == 0.0002
+
+
+def test_openai_compatible_client_retries(monkeypatch):
+    calls = {"count": 0}
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise urllib.error.URLError("temporary")
+        return FakeHTTPResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    client = OpenAICompatibleClient(
+        ProviderConfig(
+            name="coder",
+            base_url="http://localhost:8000/v1",
+            model="coder-model",
+            timeout_seconds=9,
+            max_retries=1,
+            retry_backoff_seconds=0.25,
+        )
+    )
+
+    response = client.complete([ChatMessage(role="user", content="fix")])
+
+    assert response.provider == "coder"
+    assert calls["count"] == 2
+    assert sleeps == [0.25]
 
 
 def test_deterministic_file_selection_prefers_python_sources():

@@ -97,6 +97,15 @@ def test_cli_init_config(tmp_path, capsys):
     assert "wrote" in capsys.readouterr().out
 
 
+def test_cli_init_config_preset(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    code = main(["init-config", "--repo", str(tmp_path), "--preset", "ollama"])
+
+    assert code == 0
+    assert "qwen3-coder:latest" in (tmp_path / ".gia.yaml").read_text(encoding="utf-8")
+
+
 def test_cli_init_config_refuses_overwrite(tmp_path, capsys):
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     (tmp_path / ".gia.yaml").write_text("existing: true\n", encoding="utf-8")

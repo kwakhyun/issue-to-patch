@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -55,11 +56,7 @@ class OpenAICompatibleClient:
             headers=self._headers(),
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.URLError as exc:
-            raise ModelError(f"Provider {self.config.name} request failed: {exc}") from exc
+        raw = self._send_with_retries(request)
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -90,6 +87,22 @@ class OpenAICompatibleClient:
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
         return headers
+
+    def _send_with_retries(self, request: urllib.request.Request) -> str:
+        attempts = max(self.config.max_retries, 0) + 1
+        errors: list[str] = []
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=self.config.timeout_seconds
+                ) as response:
+                    body: str = response.read().decode("utf-8")
+                    return body
+            except (TimeoutError, urllib.error.URLError) as exc:
+                errors.append(f"attempt {attempt}/{attempts}: {exc}")
+                if attempt < attempts and self.config.retry_backoff_seconds > 0:
+                    time.sleep(self.config.retry_backoff_seconds)
+        raise ModelError(f"Provider {self.config.name} request failed: {' | '.join(errors)}")
 
     def _cost(self, *, input_tokens: int, output_tokens: int) -> float:
         return (

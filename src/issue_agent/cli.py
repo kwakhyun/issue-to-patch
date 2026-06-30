@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .bench import summarize_korean_benchmark, write_swebench_predictions
-from .config import load_config, sample_config_text, validate_config
+from .config import available_config_presets, load_config, sample_config_text, validate_config
 from .diagnostics import format_doctor_report, run_doctor
 from .errors import GiaError
 from .gitops import git_root
@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     solve.add_argument(
         "--diff-only", action="store_true", help="Generate a diff without applying checks"
+    )
+    solve.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow solving when the target repo has uncommitted changes",
     )
     solve.add_argument("--out-diff", help="Write final diff to this path")
     solve.add_argument("--metadata-out", help="Append run metadata JSONL to this path")
@@ -76,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo", default=".", help="Repository where .gia.yaml should be written"
     )
     init_config.add_argument("--force", action="store_true", help="Overwrite an existing .gia.yaml")
+    init_config.add_argument(
+        "--preset",
+        choices=available_config_presets(),
+        default="local",
+        help="Starter config preset to write",
+    )
     init_config.set_defaults(func=_init_config)
 
     doctor = subparsers.add_parser("doctor", help="Check local tools and GIA configuration")
@@ -119,6 +130,7 @@ def _solve(args: argparse.Namespace) -> int:
         sandbox=sandbox,
         model_profile=args.model_profile,
         max_iters=args.max_iters,
+        allow_dirty=args.allow_dirty,
     )
     result = solver.solve(repo=args.repo, issue=issue, diff_only=args.diff_only)
     if args.out_diff:
@@ -165,8 +177,8 @@ def _init_config(args: argparse.Namespace) -> int:
     config_path = repo_path / ".gia.yaml"
     if config_path.exists() and not args.force:
         raise GiaError(f"{config_path} already exists; pass --force to overwrite it")
-    config_path.write_text(sample_config_text(), encoding="utf-8")
-    print(f"wrote {config_path}")
+    config_path.write_text(sample_config_text(args.preset), encoding="utf-8")
+    print(f"wrote {config_path} using {args.preset} preset")
     return 0
 
 
@@ -229,4 +241,5 @@ def _summary(metadata: dict[str, object]) -> dict[str, object]:
         "attempt_count": metadata.get("attempt_count"),
         "cost_usd": metadata.get("cost_usd"),
         "sandbox": metadata.get("sandbox"),
+        "allow_dirty": metadata.get("allow_dirty"),
     }

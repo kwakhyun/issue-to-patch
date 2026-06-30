@@ -2,6 +2,7 @@ import subprocess
 import sys
 
 from issue_agent.config import config_from_mapping
+from issue_agent.errors import GiaError
 from issue_agent.issue import Issue
 from issue_agent.models import ModelResponse
 from issue_agent.solver import IssueSolver
@@ -65,3 +66,48 @@ def test_solver_uses_worktree_and_returns_diff(monkeypatch, tmp_path):
     assert result.metadata["attempt_count"] == 1
     assert result.metadata["cost_usd"] == 0.02
     assert result.metadata["triage"]["provider"] == "triage"
+    assert result.metadata["allow_dirty"] is False
+    assert result.attempts[0].patch_dry_run_passed
+    assert result.attempts[0].failure_stage is None
+
+
+def test_solver_refuses_dirty_repo_by_default(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+    (tmp_path / "app.py").write_text("VALUE = 99\n", encoding="utf-8")
+    config = config_from_mapping({"checks": {"commands": [f"{sys.executable} -c 'pass'"]}})
+    solver = IssueSolver(config=config, sandbox="local", model_profile=None, max_iters=1)
+
+    try:
+        solver.solve(
+            repo=tmp_path,
+            issue=Issue(title="Update value", body="Change VALUE to 2", source="test"),
+        )
+    except GiaError as exc:
+        assert "--allow-dirty" in str(exc)
+    else:
+        raise AssertionError("dirty repo should be rejected")
+
+
+def test_solver_allows_dirty_repo_when_explicit(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+    (tmp_path / "notes.txt").write_text("local note\n", encoding="utf-8")
+    check = f"{sys.executable} -c 'pass'"
+    config = config_from_mapping({"checks": {"commands": [check]}})
+    solver = IssueSolver(
+        config=config,
+        sandbox="local",
+        model_profile=None,
+        max_iters=1,
+        allow_dirty=True,
+    )
+
+    result = solver.solve(
+        repo=tmp_path,
+        issue=Issue(title="Update value", body="Change VALUE to 2", source="test"),
+    )
+
+    assert result.resolved
+    assert result.metadata["original_dirty"] is True
+    assert result.metadata["allow_dirty"] is True

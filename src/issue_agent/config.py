@@ -17,6 +17,7 @@ class ProviderConfig:
     timeout_seconds: int = 120
     max_retries: int = 0
     retry_backoff_seconds: float = 1.0
+    max_tokens: int | None = None
     input_cost_per_1m: float = 0.0
     output_cost_per_1m: float = 0.0
 
@@ -60,6 +61,10 @@ class SandboxConfig:
     default: str = "local"
     docker_image: str = "python:3.11"
     docker_workdir: str = "/workspace"
+    docker_network: str = "none"
+    docker_read_only: bool = False
+    docker_env: tuple[str, ...] = ()
+    docker_user: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,12 +87,14 @@ LOCAL_CONFIG = """providers:
     role: triage
     timeout_seconds: 60
     max_retries: 1
+    max_tokens: 1500
   coder:
     base_url: http://localhost:8000/v1
     model: Qwen/Qwen3-Coder-30B-A3B-Instruct
     role: coder
     timeout_seconds: 120
     max_retries: 1
+    max_tokens: 12000
   # Optional external fallback. Uncomment and set api_key_env only when you
   # explicitly want network fallback outside your local models.
   # fallback:
@@ -109,6 +116,10 @@ sandbox:
   default: local
   docker_image: python:3.11
   docker_workdir: /workspace
+  docker_network: none
+  docker_read_only: false
+  docker_env: []
+  docker_user: null
 """
 
 OLLAMA_CONFIG = """providers:
@@ -118,12 +129,14 @@ OLLAMA_CONFIG = """providers:
     role: triage
     timeout_seconds: 60
     max_retries: 1
+    max_tokens: 1500
   coder:
     base_url: http://localhost:11434/v1
     model: qwen3-coder:latest
     role: coder
     timeout_seconds: 120
     max_retries: 1
+    max_tokens: 12000
 router:
   triage_model: triage
   coder_model: coder
@@ -138,6 +151,10 @@ sandbox:
   default: local
   docker_image: python:3.11
   docker_workdir: /workspace
+  docker_network: none
+  docker_read_only: false
+  docker_env: []
+  docker_user: null
 """
 
 VLLM_CONFIG = """providers:
@@ -147,12 +164,14 @@ VLLM_CONFIG = """providers:
     role: triage
     timeout_seconds: 60
     max_retries: 1
+    max_tokens: 1500
   coder:
     base_url: http://localhost:8000/v1
     model: Qwen/Qwen3-Coder-30B-A3B-Instruct
     role: coder
     timeout_seconds: 120
     max_retries: 1
+    max_tokens: 12000
 router:
   triage_model: triage
   coder_model: coder
@@ -167,6 +186,10 @@ sandbox:
   default: local
   docker_image: python:3.11
   docker_workdir: /workspace
+  docker_network: none
+  docker_read_only: false
+  docker_env: []
+  docker_user: null
 """
 
 OPENAI_COMPATIBLE_CONFIG = """providers:
@@ -178,6 +201,7 @@ OPENAI_COMPATIBLE_CONFIG = """providers:
     timeout_seconds: 120
     max_retries: 2
     retry_backoff_seconds: 1.5
+    max_tokens: 12000
 router:
   triage_model: coder
   coder_model: coder
@@ -192,6 +216,10 @@ sandbox:
   default: local
   docker_image: python:3.11
   docker_workdir: /workspace
+  docker_network: none
+  docker_read_only: false
+  docker_env: []
+  docker_user: null
 """
 
 CONFIG_PRESETS = {
@@ -274,11 +302,25 @@ def config_from_mapping(data: dict[str, Any], base: Config | None = None) -> Con
     sandbox = config.sandbox
     if "sandbox" in data:
         raw_sandbox = _as_mapping(data["sandbox"], "sandbox")
+        docker_env = raw_sandbox.get("docker_env", sandbox.docker_env)
+        docker_env_tuple: tuple[str, ...]
+        if isinstance(docker_env, str):
+            docker_env_tuple = (docker_env,)
+        elif isinstance(docker_env, list | tuple):
+            docker_env_tuple = tuple(str(item) for item in docker_env)
+        else:
+            raise ConfigError("sandbox.docker_env must be a string or list of strings")
         sandbox = replace(
             sandbox,
             default=str(raw_sandbox.get("default", sandbox.default)),
             docker_image=str(raw_sandbox.get("docker_image", sandbox.docker_image)),
             docker_workdir=str(raw_sandbox.get("docker_workdir", sandbox.docker_workdir)),
+            docker_network=str(raw_sandbox.get("docker_network", sandbox.docker_network)),
+            docker_read_only=_as_bool(
+                raw_sandbox.get("docker_read_only", sandbox.docker_read_only)
+            ),
+            docker_env=docker_env_tuple,
+            docker_user=_optional_str(raw_sandbox.get("docker_user", sandbox.docker_user)),
         )
         if sandbox.default not in {"local", "docker"}:
             raise ConfigError("sandbox.default must be 'local' or 'docker'")
@@ -357,6 +399,14 @@ def validate_config(config: Config) -> list[ConfigIssue]:
                     "retry backoff must be non-negative",
                 )
             )
+        if provider.max_tokens is not None and provider.max_tokens <= 0:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    f"providers.{name}.max_tokens",
+                    "max_tokens must be positive when set",
+                )
+            )
         if provider.input_cost_per_1m < 0:
             issues.append(
                 ConfigIssue(
@@ -382,6 +432,13 @@ def validate_config(config: Config) -> list[ConfigIssue]:
         issues.append(ConfigIssue("error", "sandbox.default", "must be 'local' or 'docker'"))
     if not config.sandbox.docker_image:
         issues.append(ConfigIssue("warn", "sandbox.docker_image", "docker sandbox has no image"))
+    if not config.sandbox.docker_workdir.startswith("/"):
+        issues.append(ConfigIssue("error", "sandbox.docker_workdir", "must be an absolute path"))
+    if config.sandbox.docker_network == "":
+        issues.append(ConfigIssue("warn", "sandbox.docker_network", "docker network is empty"))
+    for index, name in enumerate(config.sandbox.docker_env):
+        if not name:
+            issues.append(ConfigIssue("error", f"sandbox.docker_env.{index}", "env name is empty"))
 
     return issues
 
@@ -400,6 +457,7 @@ def _provider_from_mapping(
         timeout_seconds=int(data.get("timeout_seconds", base.timeout_seconds)),
         max_retries=int(data.get("max_retries", base.max_retries)),
         retry_backoff_seconds=float(data.get("retry_backoff_seconds", base.retry_backoff_seconds)),
+        max_tokens=_optional_int(data.get("max_tokens", base.max_tokens)),
         input_cost_per_1m=float(data.get("input_cost_per_1m", base.input_cost_per_1m)),
         output_cost_per_1m=float(data.get("output_cost_per_1m", base.output_cost_per_1m)),
     )
@@ -521,3 +579,9 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text or None
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)

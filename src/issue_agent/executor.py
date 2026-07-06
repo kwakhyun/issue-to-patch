@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -75,20 +77,44 @@ class CommandRunner:
             )
 
     def _run_docker(self, command: str, cwd: str | Path) -> subprocess.CompletedProcess[str]:
+        if not shutil.which("docker"):
+            return subprocess.CompletedProcess(
+                args=["docker"],
+                returncode=127,
+                stdout="",
+                stderr="docker executable was not found on PATH",
+            )
         host_path = str(Path(cwd).resolve())
+        volume = f"{host_path}:{self.sandbox_config.docker_workdir}"
+        if self.sandbox_config.docker_read_only:
+            volume += ":ro"
         docker_command = [
             "docker",
             "run",
             "--rm",
+            "--network",
+            self.sandbox_config.docker_network,
             "-v",
-            f"{host_path}:{self.sandbox_config.docker_workdir}",
+            volume,
             "-w",
             self.sandbox_config.docker_workdir,
-            self.sandbox_config.docker_image,
-            "sh",
-            "-lc",
-            command,
         ]
+        if self.sandbox_config.docker_read_only:
+            docker_command.append("--read-only")
+        docker_user = _docker_user(self.sandbox_config.docker_user)
+        if docker_user:
+            docker_command.extend(["--user", docker_user])
+        for name in self.sandbox_config.docker_env:
+            if name in os.environ:
+                docker_command.extend(["-e", name])
+        docker_command.extend(
+            [
+                self.sandbox_config.docker_image,
+                "sh",
+                "-lc",
+                command,
+            ]
+        )
         try:
             return subprocess.run(
                 docker_command,
@@ -127,3 +153,11 @@ def _timeout_output(value: str | bytes | None) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
+
+
+def _docker_user(configured: str | None) -> str | None:
+    if configured:
+        return configured
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        return f"{os.getuid()}:{os.getgid()}"
+    return None

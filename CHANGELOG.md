@@ -13,3 +13,8 @@ The project follows semantic versioning once tagged releases begin.
   config initialization, provider timeout/retry settings, solve dirty-repo
   policy, patch dry-run checks, config presets, release workflow, and issue/PR
   templates.
+- Added solve run artifact outputs, worktree debugging controls, check override
+  options, quiet/verbose output modes, and GitHub issue shorthand input.
+- Added correctness guardrails for unchecked runs, hardened solve artifacts,
+  Docker sandbox controls, Korean benchmark solve mode, provider max-token
+  settings, model probe reuse, and fallback provider metadata.

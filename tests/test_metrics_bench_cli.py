@@ -1,9 +1,47 @@
 import json
 import subprocess
+import sys
 
 from issue_agent.bench import summarize_korean_benchmark, write_swebench_predictions
 from issue_agent.cli import main
 from issue_agent.metrics import compute_leaderboard, format_leaderboard, sort_leaderboard
+from issue_agent.models import ModelResponse
+
+PATCH = """diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 2
+"""
+
+
+class FakeOpenAIClient:
+    def __init__(self, config):
+        self.config = config
+
+    def complete(self, messages, **kwargs):
+        text = '{"files": ["app.py"]}' if self.config.name == "triage" else PATCH
+        return ModelResponse(
+            text=text,
+            provider=self.config.name,
+            model=self.config.model,
+            input_tokens=10,
+            output_tokens=20,
+            cost_usd=0.01,
+        )
+
+
+def _init_repo(path):
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    (path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@example.com", "-c", "user.name=A", "commit", "-m", "init"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
 
 
 def test_compute_leaderboard_zero_cost_and_paid():
@@ -135,3 +173,152 @@ def test_cli_config_validate(tmp_path, capsys):
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out)["ok"] is True
+
+
+def test_cli_solve_run_dir_writes_artifacts(monkeypatch, tmp_path, capsys):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+    run_dir = tmp_path / "run"
+    check = f"{sys.executable} -c \"print('override-check')\""
+
+    code = main(
+        [
+            "solve",
+            "--repo",
+            str(tmp_path),
+            "--issue-text",
+            "Update value\n\nChange VALUE to 2",
+            "--check-command",
+            check,
+            "--run-dir",
+            str(run_dir),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "+VALUE = 2" in captured.out
+    assert json.loads(captured.err)["status"] == "resolved"
+    assert (run_dir / "final.patch").exists()
+    assert (run_dir / "metadata.json").exists()
+    assert (run_dir / "summary.json").exists()
+    attempts = [json.loads(line) for line in (run_dir / "attempts.jsonl").read_text().splitlines()]
+    assert attempts[0]["checks"][0]["stdout"].strip() == "override-check"
+
+
+def test_cli_solve_summary_attempts_quiet(monkeypatch, tmp_path, capsys):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+    summary_out = tmp_path / "summary.json"
+    attempts_out = tmp_path / "attempts.jsonl"
+
+    code = main(
+        [
+            "solve",
+            "--repo",
+            str(tmp_path),
+            "--issue-text",
+            "Update value",
+            "--skip-checks",
+            "--quiet",
+            "--summary-out",
+            str(summary_out),
+            "--attempts-out",
+            str(attempts_out),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    summary = json.loads(summary_out.read_text(encoding="utf-8"))
+    attempt = json.loads(attempts_out.read_text(encoding="utf-8"))
+    assert code == 2
+    assert captured.err == ""
+    assert summary["status"] == "unchecked"
+    assert attempt["patch_applied"] is True
+    assert attempt["checks"] == []
+
+
+def test_cli_solve_verbose_logs_to_stderr(monkeypatch, tmp_path, capsys):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+
+    code = main(
+        [
+            "solve",
+            "--repo",
+            str(tmp_path),
+            "--issue-text",
+            "Update value",
+            "--skip-checks",
+            "--verbose",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "[gia] loading issue input" in captured.err
+    assert "[gia] iteration 1: applying patch" in captured.err
+
+
+def test_cli_solve_writes_error_artifact(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    error_out = tmp_path / "error.json"
+
+    code = main(
+        [
+            "solve",
+            "--repo",
+            str(tmp_path),
+            "--issue-file",
+            str(tmp_path / "missing.md"),
+            "--run-dir",
+            str(run_dir),
+            "--error-out",
+            str(error_out),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads((run_dir / "error.json").read_text(encoding="utf-8"))
+    assert code == 1
+    assert "Issue file does not exist" in captured.err
+    assert payload["schema_version"] == "gia.error.v1"
+    assert payload["run_id"] == json.loads(error_out.read_text(encoding="utf-8"))["run_id"]
+
+
+def test_cli_korean_benchmark_can_run_solve(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", FakeOpenAIClient)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        json.dumps(
+            {
+                "id": "kr-1",
+                "repo": str(tmp_path),
+                "issue_text": "Update value\n\nChange VALUE to 2",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "runs.jsonl"
+
+    code = main(
+        [
+            "bench",
+            "korean",
+            "--cases",
+            str(cases),
+            "--out",
+            str(out),
+            "--solve",
+            "--skip-checks",
+            "--allow-dirty",
+        ]
+    )
+
+    record = json.loads(out.read_text(encoding="utf-8"))
+    assert code == 0
+    assert record["benchmark"] == "korean"
+    assert record["case_id"] == "kr-1"
+    assert record["status"] == "unchecked"

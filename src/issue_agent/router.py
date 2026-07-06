@@ -24,6 +24,8 @@ class ModelRouter:
         self.config = config
         self.model_profile = model_profile
         self.last_triage_response: ModelResponse | None = None
+        self.last_patch_provider: str | None = None
+        self.last_patch_provider_errors: list[dict[str, str]] = []
 
     def choose_files(self, issue: Issue, tracked_files: list[str]) -> list[str]:
         provider = self._provider(self.config.router.triage_model)
@@ -38,12 +40,15 @@ class ModelRouter:
                         ChatMessage(role="user", content=prompt),
                     ],
                     temperature=0.0,
-                    max_tokens=1500,
+                    max_tokens=provider.max_tokens or 1500,
+                    response_format={"type": "json_object"},
                 )
                 self.last_triage_response = response
                 parsed = _parse_file_selection(response.text)
                 if parsed:
-                    return _existing_files(parsed, tracked_files)
+                    existing = _existing_files(parsed, tracked_files)
+                    if existing:
+                        return existing
             except ModelError:
                 pass
         return deterministic_file_selection(tracked_files)
@@ -64,17 +69,24 @@ class ModelRouter:
             "Return a unified git diff that can be applied with `git apply`."
         )
         errors: list[str] = []
+        self.last_patch_provider = None
+        self.last_patch_provider_errors = []
         for provider in self._patch_providers():
             try:
-                return OpenAICompatibleClient(provider).complete(
+                response = OpenAICompatibleClient(provider).complete(
                     [
                         ChatMessage(role="system", content=CODER_SYSTEM),
                         ChatMessage(role="user", content=user_prompt),
                     ],
                     temperature=0.1,
+                    max_tokens=provider.max_tokens,
                 )
+                self.last_patch_provider = provider.name
+                return response
             except ModelError as exc:
-                errors.append(str(exc))
+                error = str(exc)
+                errors.append(error)
+                self.last_patch_provider_errors.append({"provider": provider.name, "error": error})
         raise ModelError("No patch provider succeeded: " + " | ".join(errors))
 
     def _patch_providers(self) -> list[ProviderConfig]:

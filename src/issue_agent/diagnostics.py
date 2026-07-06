@@ -4,13 +4,12 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from .config import Config, load_config, validate_config
+from .models import probe_provider_models
 
 DiagnosticStatus = Literal["pass", "warn", "fail", "skip"]
 
@@ -211,30 +210,14 @@ def _model_probe_checks(config: Config) -> list[DiagnosticCheck]:
                 )
             )
             continue
-        request = urllib.request.Request(
-            f"{provider.base_url.rstrip('/')}/models",
-            headers=_provider_headers(provider.api_key_env),
-            method="GET",
-        )
-        try:
-            with urllib.request.urlopen(
-                request, timeout=min(provider.timeout_seconds, 10)
-            ) as response:
-                status = getattr(response, "status", 200)
-        except urllib.error.URLError as exc:
-            checks.append(DiagnosticCheck(f"model:{name}", "warn", f"probe failed: {exc}"))
+        result = probe_provider_models(provider)
+        if not result.ok:
+            checks.append(DiagnosticCheck(f"model:{name}", "warn", f"probe failed: {result.error}"))
         else:
-            checks.append(DiagnosticCheck(f"model:{name}", "pass", f"GET /models -> {status}"))
+            checks.append(
+                DiagnosticCheck(f"model:{name}", "pass", f"GET /models -> {result.status}")
+            )
     return checks
-
-
-def _provider_headers(api_key_env: str | None) -> dict[str, str]:
-    if not api_key_env:
-        return {}
-    api_key = os.environ.get(api_key_env)
-    if not api_key:
-        return {}
-    return {"Authorization": f"Bearer {api_key}"}
 
 
 def _gh_auth_check() -> DiagnosticCheck:

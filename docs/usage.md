@@ -42,6 +42,7 @@ checks configured OpenAI-compatible `/models` endpoints.
 gia solve \
   --repo /path/to/repo \
   --issue-file issue.md \
+  --run-dir .gia-runs/issue-123 \
   --out-diff fix.patch \
   --metadata-out runs.jsonl
 ```
@@ -54,6 +55,30 @@ only when the current uncommitted changes are unrelated and you still want GIA
 to build an isolated worktree from `HEAD`. Patch attempts include failure-stage
 metadata and pass `git apply --check` before application.
 
+Issue input accepts GitHub URLs, `owner/repo#123`, and `#123` when the target
+repository has a GitHub `origin` remote. GitHub refs are fetched with
+`gh issue view`; save the issue as markdown or JSON and pass `--issue-file`
+when `gh` is unavailable.
+
+`--run-dir PATH` writes `final.patch`, `metadata.json`, `attempts.jsonl`, and
+`summary.json` for the run. Use `--summary-out` and `--attempts-out` to write
+those artifacts to explicit standalone paths. Use `--error-out PATH` when you
+also want machine-readable error JSON for failures that happen before solve
+metadata exists.
+
+Operational controls:
+
+- `--base-ref REF`: create the temporary worktree from a specific ref.
+- `--keep-worktree never|on-failure|always`: preserve the worktree for debugging.
+- `--check-command CMD`: override configured checks; repeat for multiple checks.
+- `--skip-checks`: apply the patch and record `status=unchecked`; unchecked
+  exits with code 2.
+- `--check-timeout SECONDS`: override validation command timeout.
+- `--quiet` / `--verbose`: suppress summary or emit progress logs on stderr.
+
+Detailed attempt artifacts cap and redact check stdout/stderr. Solve metadata
+includes `schema_version`, `run_id`, `patch_provider`, and `fallback_used`.
+
 ## Leaderboard
 
 ```bash
@@ -63,6 +88,20 @@ gia leaderboard --runs runs.jsonl --json
 
 Local zero-cost runs are reported separately from paid resolved-per-dollar
 scores.
+
+## Korean Benchmark Solve Mode
+
+```bash
+gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --limit 10
+```
+
+With `--solve`, each case must include `repo` and exactly one of `issue`,
+`issue_file`, or `issue_text`. The command runs the same isolated worktree
+solver used by `gia solve` and writes one run metadata record per case.
+
+Docker sandbox defaults to `docker_network: none`. Docker runs can also be
+configured with `docker_read_only`, `docker_env`, and `docker_user` in
+`.gia.yaml`.
 
 ## Release
 

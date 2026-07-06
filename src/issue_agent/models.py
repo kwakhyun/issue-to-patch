@@ -28,6 +28,14 @@ class ModelResponse:
     cost_usd: float = 0.0
 
 
+@dataclass(frozen=True)
+class ProviderProbe:
+    provider: str
+    ok: bool
+    status: int | None
+    error: str | None = None
+
+
 class OpenAICompatibleClient:
     def __init__(self, config: ProviderConfig) -> None:
         self.config = config
@@ -38,6 +46,7 @@ class OpenAICompatibleClient:
         *,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         if not self.config.base_url:
             raise ModelError(f"Provider {self.config.name} has no base_url")
@@ -50,6 +59,8 @@ class OpenAICompatibleClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if response_format is not None:
+            payload["response_format"] = response_format
         request = urllib.request.Request(
             url=f"{self.config.base_url.rstrip('/')}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -109,3 +120,35 @@ class OpenAICompatibleClient:
             input_tokens * self.config.input_cost_per_1m / 1_000_000
             + output_tokens * self.config.output_cost_per_1m / 1_000_000
         )
+
+
+def probe_provider_models(config: ProviderConfig, *, timeout_seconds: int = 10) -> ProviderProbe:
+    request = urllib.request.Request(
+        f"{config.base_url.rstrip('/')}/models",
+        headers=_provider_headers(config.api_key_env),
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=min(config.timeout_seconds, timeout_seconds),
+        ) as response:
+            status = int(getattr(response, "status", 200))
+    except urllib.error.URLError as exc:
+        return ProviderProbe(provider=config.name, ok=False, status=None, error=str(exc))
+    ok = 200 <= status < 400
+    return ProviderProbe(
+        provider=config.name,
+        ok=ok,
+        status=status,
+        error=None if ok else f"GET /models -> {status}",
+    )
+
+
+def _provider_headers(api_key_env: str | None) -> dict[str, str]:
+    if not api_key_env:
+        return {}
+    api_key = os.environ.get(api_key_env)
+    if not api_key:
+        return {}
+    return {"Authorization": f"Bearer {api_key}"}

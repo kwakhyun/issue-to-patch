@@ -58,7 +58,7 @@ def test_doctor_model_probe(monkeypatch, tmp_path):
         assert timeout == 10
         return FakeHTTPResponse()
 
-    monkeypatch.setattr("issue_agent.diagnostics.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("issue_agent.models.urllib.request.urlopen", fake_urlopen)
 
     report = run_doctor(repo=tmp_path, probe_models=True)
 

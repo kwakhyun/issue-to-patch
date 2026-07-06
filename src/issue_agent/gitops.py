@@ -25,15 +25,22 @@ class IsolatedWorktree:
     path: Path
     branch: str
     temp_root: Path
+    base_ref: str
 
     @classmethod
-    def create(cls, repo: str | Path) -> IsolatedWorktree:
+    def create(cls, repo: str | Path, *, base_ref: str = "HEAD") -> IsolatedWorktree:
         original = git_root(repo)
         temp_root = Path(tempfile.mkdtemp(prefix="gia-worktree-"))
         worktree_path = temp_root / "repo"
         branch = f"gia/{uuid.uuid4().hex[:12]}"
-        run_git(["worktree", "add", "-b", branch, str(worktree_path), "HEAD"], cwd=original)
-        return cls(original_repo=original, path=worktree_path, branch=branch, temp_root=temp_root)
+        run_git(["worktree", "add", "-b", branch, str(worktree_path), base_ref], cwd=original)
+        return cls(
+            original_repo=original,
+            path=worktree_path,
+            branch=branch,
+            temp_root=temp_root,
+            base_ref=base_ref,
+        )
 
     def cleanup(self) -> None:
         with suppress(GitError):

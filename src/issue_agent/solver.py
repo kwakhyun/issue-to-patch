@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .config import Config
 from .errors import GiaError, ModelError, PatchError
@@ -19,6 +22,34 @@ from .gitops import (
 from .issue import Issue
 from .patches import apply_unified_diff, check_unified_diff, extract_unified_diff
 from .router import ModelRouter
+
+KeepWorktree = Literal["never", "on-failure", "always"]
+SOLVE_METADATA_SCHEMA_VERSION = "gia.solve.v1"
+ATTEMPT_OUTPUT_LIMIT = 64_000
+
+
+@dataclass(frozen=True)
+class SolveOptions:
+    sandbox: str
+    model_profile: str | None = None
+    max_iters: int = 3
+    diff_only: bool = False
+    allow_dirty: bool = False
+    base_ref: str = "HEAD"
+    keep_worktree: KeepWorktree = "never"
+    check_commands: tuple[str, ...] | None = None
+    skip_checks: bool = False
+    check_timeout_seconds: int | None = None
+    event_callback: Callable[[str], None] | None = None
+    run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if self.max_iters < 1:
+            raise GiaError("max-iters must be >= 1")
+        if self.keep_worktree not in {"never", "on-failure", "always"}:
+            raise GiaError("keep-worktree must be one of: never, on-failure, always")
+        if self.check_timeout_seconds is not None and self.check_timeout_seconds <= 0:
+            raise GiaError("check-timeout must be positive")
 
 
 @dataclass(frozen=True)
@@ -37,7 +68,12 @@ class AttemptRecord:
     output_tokens: int
     check_results: list[CommandResult] = field(default_factory=list)
 
-    def to_json(self) -> dict[str, Any]:
+    def to_json(
+        self,
+        *,
+        include_outputs: bool = False,
+        output_limit: int = ATTEMPT_OUTPUT_LIMIT,
+    ) -> dict[str, Any]:
         return {
             "iteration": self.iteration,
             "provider": self.provider,
@@ -52,13 +88,11 @@ class AttemptRecord:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "checks": [
-                {
-                    "command": result.command,
-                    "returncode": result.returncode,
-                    "passed": result.passed,
-                    "duration_seconds": result.duration_seconds,
-                    "sandbox": result.sandbox,
-                }
+                _command_result_to_json(
+                    result,
+                    include_outputs,
+                    output_limit=output_limit,
+                )
                 for result in self.check_results
             ],
         }
@@ -78,48 +112,52 @@ class IssueSolver:
         self,
         *,
         config: Config,
-        sandbox: str,
-        model_profile: str | None,
-        max_iters: int,
-        allow_dirty: bool = False,
+        options: SolveOptions,
     ) -> None:
-        if max_iters < 1:
-            raise ValueError("max_iters must be >= 1")
         self.config = config
-        self.sandbox = sandbox
-        self.model_profile = model_profile
-        self.max_iters = max_iters
-        self.allow_dirty = allow_dirty
+        self.options = options
 
-    def solve(self, *, repo: str | Path, issue: Issue, diff_only: bool = False) -> SolveResult:
+    def solve(self, *, repo: str | Path, issue: Issue) -> SolveResult:
         repo_path = Path(repo).expanduser().resolve()
         start = time.monotonic()
         original_dirty = is_dirty(repo_path)
-        if original_dirty and not self.allow_dirty:
+        if original_dirty and not self.options.allow_dirty:
             raise GiaError(
                 "Target repository has uncommitted changes; pass --allow-dirty to proceed"
             )
-        worktree = IsolatedWorktree.create(repo_path)
+        self._emit(f"creating worktree from {self.options.base_ref}")
+        worktree = IsolatedWorktree.create(repo_path, base_ref=self.options.base_ref)
+        self._emit(f"created worktree {worktree.path} on {worktree.branch}")
         attempts: list[AttemptRecord] = []
         total_cost = 0.0
         final_diff = ""
         status = "failed"
         resolved = False
+        kept_worktree = _should_keep_worktree(self.options.keep_worktree, status, resolved)
         try:
-            router = ModelRouter(self.config, model_profile=self.model_profile)
+            router = ModelRouter(self.config, model_profile=self.options.model_profile)
+            self._emit("triaging repository files")
             tracked_files = list_tracked_files(worktree.path)
             selected_files = router.choose_files(issue, tracked_files)
+            self._emit(f"selected {len(selected_files)} files for context")
             if router.last_triage_response:
                 total_cost += router.last_triage_response.cost_usd
             file_context = read_selected_files(worktree.path, selected_files)
             feedback: str | None = None
+            check_commands = (
+                self.options.check_commands
+                if self.options.check_commands is not None
+                else self.config.checks.enabled_commands()
+            )
             runner = CommandRunner(
-                sandbox=self.sandbox,
+                sandbox=self.options.sandbox,
                 sandbox_config=self.config.sandbox,
-                timeout_seconds=self.config.checks.timeout_seconds,
+                timeout_seconds=(
+                    self.options.check_timeout_seconds or self.config.checks.timeout_seconds
+                ),
             )
 
-            for iteration in range(1, self.max_iters + 1):
+            for iteration in range(1, self.options.max_iters + 1):
                 response = None
                 patch_valid = False
                 patch_dry_run_passed = False
@@ -130,6 +168,7 @@ class IssueSolver:
                 error: str | None = None
                 try:
                     failure_stage = "model"
+                    self._emit(f"iteration {iteration}: requesting patch")
                     response = router.generate_patch(
                         issue=issue,
                         file_context=file_context,
@@ -141,9 +180,10 @@ class IssueSolver:
                     patch = extract_unified_diff(response.text)
                     patch_valid = True
                     failure_stage = "patch_dry_run"
+                    self._emit(f"iteration {iteration}: dry-run checking patch")
                     check_unified_diff(worktree.path, patch)
                     patch_dry_run_passed = True
-                    if diff_only:
+                    if self.options.diff_only:
                         final_diff = patch
                         status = "diff_only"
                         attempts.append(
@@ -161,12 +201,49 @@ class IssueSolver:
                         )
                         break
                     failure_stage = "apply_patch"
+                    self._emit(f"iteration {iteration}: applying patch")
                     apply_unified_diff(worktree.path, patch)
                     patch_applied = True
+                    if self.options.skip_checks:
+                        final_diff = current_diff(worktree.path)
+                        status = "unchecked"
+                        self._emit(f"iteration {iteration}: checks skipped")
+                        attempts.append(
+                            _attempt(
+                                iteration=iteration,
+                                response=response,
+                                patch_valid=patch_valid,
+                                patch_dry_run_passed=patch_dry_run_passed,
+                                patch_applied=patch_applied,
+                                checks_passed=False,
+                                failure_stage=None,
+                                error=None,
+                                check_results=[],
+                            )
+                        )
+                        break
                     failure_stage = "checks"
-                    check_results = runner.run_checks(
-                        self.config.checks.enabled_commands(), worktree.path
-                    )
+                    if not check_commands:
+                        final_diff = current_diff(worktree.path)
+                        status = "unchecked"
+                        error = "no_checks_configured"
+                        self._emit(f"iteration {iteration}: no checks configured")
+                        attempts.append(
+                            _attempt(
+                                iteration=iteration,
+                                response=response,
+                                patch_valid=patch_valid,
+                                patch_dry_run_passed=patch_dry_run_passed,
+                                patch_applied=patch_applied,
+                                checks_passed=False,
+                                failure_stage=failure_stage,
+                                error=error,
+                                check_results=[],
+                            )
+                        )
+                        break
+                    self._emit(f"iteration {iteration}: running {len(check_commands)} checks")
+                    check_results = runner.run_checks(check_commands, worktree.path)
                     checks_passed = all(result.passed for result in check_results)
                     final_diff = current_diff(worktree.path)
                     if checks_passed:
@@ -188,6 +265,7 @@ class IssueSolver:
                         break
                     feedback = summarize_results(check_results)
                     error = "checks_failed"
+                    self._emit(f"iteration {iteration}: checks failed")
                 except (ModelError, PatchError, GiaError) as exc:
                     error = str(exc)
                     feedback = error
@@ -216,24 +294,41 @@ class IssueSolver:
                 status = "unresolved"
 
             metadata = {
+                "schema_version": SOLVE_METADATA_SCHEMA_VERSION,
+                "run_id": self.options.run_id,
                 "repo": str(repo_path),
                 "issue_source": issue.source,
                 "issue_url": issue.url,
                 "resolved": resolved,
                 "status": status,
-                "sandbox": self.sandbox,
-                "model_profile": self.model_profile,
-                "max_iters": self.max_iters,
-                "allow_dirty": self.allow_dirty,
+                "sandbox": self.options.sandbox,
+                "model_profile": self.options.model_profile,
+                "max_iters": self.options.max_iters,
+                "allow_dirty": self.options.allow_dirty,
+                "base_ref": self.options.base_ref,
+                "keep_worktree": self.options.keep_worktree,
+                "kept_worktree": _should_keep_worktree(
+                    self.options.keep_worktree, status, resolved
+                ),
                 "attempt_count": len(attempts),
                 "cost_usd": total_cost,
                 "triage": _model_response_metadata(router.last_triage_response),
+                "patch_provider": router.last_patch_provider,
+                "patch_provider_errors": router.last_patch_provider_errors,
+                "fallback_used": _fallback_used(self.config.router.fallback_model, attempts),
                 "duration_seconds": time.monotonic() - start,
                 "original_dirty": original_dirty,
+                "worktree_path": str(worktree.path),
                 "worktree_branch": worktree.branch,
                 "selected_files": selected_files,
+                "check_commands": list(check_commands),
+                "checks_skipped": self.options.skip_checks,
+                "check_timeout_seconds": (
+                    self.options.check_timeout_seconds or self.config.checks.timeout_seconds
+                ),
                 "attempts": [attempt.to_json() for attempt in attempts],
             }
+            kept_worktree = bool(metadata["kept_worktree"])
             return SolveResult(
                 resolved=resolved,
                 status=status,
@@ -242,7 +337,12 @@ class IssueSolver:
                 attempts=attempts,
             )
         finally:
-            worktree.cleanup()
+            if not kept_worktree:
+                worktree.cleanup()
+
+    def _emit(self, message: str) -> None:
+        if self.options.event_callback:
+            self.options.event_callback(message)
 
 
 def append_metadata(path: str | Path, metadata: dict[str, Any]) -> None:
@@ -291,3 +391,56 @@ def _model_response_metadata(response: Any) -> dict[str, Any] | None:
         "input_tokens": int(getattr(response, "input_tokens", 0)),
         "output_tokens": int(getattr(response, "output_tokens", 0)),
     }
+
+
+def _command_result_to_json(
+    result: CommandResult,
+    include_outputs: bool,
+    *,
+    output_limit: int,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "command": result.command,
+        "returncode": result.returncode,
+        "passed": result.passed,
+        "duration_seconds": result.duration_seconds,
+        "sandbox": result.sandbox,
+    }
+    if include_outputs:
+        payload["stdout"] = _sanitize_output(result.stdout, limit=output_limit)
+        payload["stderr"] = _sanitize_output(result.stderr, limit=output_limit)
+    return payload
+
+
+def _should_keep_worktree(policy: KeepWorktree, status: str, resolved: bool) -> bool:
+    if policy == "always":
+        return True
+    if policy == "on-failure":
+        return not resolved and status != "diff_only"
+    return False
+
+
+def _fallback_used(fallback_model: str | None, attempts: list[AttemptRecord]) -> bool:
+    if not fallback_model:
+        return False
+    return any(attempt.provider == fallback_model for attempt in attempts)
+
+
+def _sanitize_output(value: str, *, limit: int) -> str:
+    redacted = _redact_secrets(value)
+    if len(redacted) <= limit:
+        return redacted
+    omitted = len(redacted) - limit
+    return redacted[:limit] + f"\n...[truncated {omitted} characters]"
+
+
+def _redact_secrets(value: str) -> str:
+    patterns = [
+        r"(?i)(authorization:\s*bearer\s+)([A-Za-z0-9._~+/=-]+)",
+        r"(?i)(bearer\s+)([A-Za-z0-9._~+/=-]{12,})",
+        r"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s'\";,]+)",
+    ]
+    redacted = value
+    for pattern in patterns:
+        redacted = re.sub(pattern, r"\1[REDACTED]", redacted)
+    return redacted

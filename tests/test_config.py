@@ -25,6 +25,7 @@ def test_config_from_mapping_overrides_nested_values():
                     "timeout_seconds": 33,
                     "max_retries": 2,
                     "retry_backoff_seconds": 0.25,
+                    "max_tokens": 4096,
                     "input_cost_per_1m": 1.0,
                 },
                 "fallback": {
@@ -34,7 +35,14 @@ def test_config_from_mapping_overrides_nested_values():
             },
             "router": {"coder_model": "coder", "fallback_model": "fallback"},
             "checks": {"commands": ["python -m pytest -q"], "mypy_enabled": True},
-            "sandbox": {"default": "docker", "docker_image": "python:3.11-slim"},
+            "sandbox": {
+                "default": "docker",
+                "docker_image": "python:3.11-slim",
+                "docker_network": "none",
+                "docker_read_only": True,
+                "docker_env": ["PIP_INDEX_URL"],
+                "docker_user": "1000:1000",
+            },
         }
     )
 
@@ -42,10 +50,15 @@ def test_config_from_mapping_overrides_nested_values():
     assert config.providers["coder"].timeout_seconds == 33
     assert config.providers["coder"].max_retries == 2
     assert config.providers["coder"].retry_backoff_seconds == 0.25
+    assert config.providers["coder"].max_tokens == 4096
     assert config.providers["coder"].input_cost_per_1m == 1.0
     assert config.router.fallback_model == "fallback"
     assert config.checks.enabled_commands() == ("python -m pytest -q", "mypy .")
     assert config.sandbox.default == "docker"
+    assert config.sandbox.docker_network == "none"
+    assert config.sandbox.docker_read_only is True
+    assert config.sandbox.docker_env == ("PIP_INDEX_URL",)
+    assert config.sandbox.docker_user == "1000:1000"
 
 
 def test_simple_yaml_fallback_shape(tmp_path):
@@ -108,6 +121,7 @@ def test_validate_config_reports_bad_provider_runtime_values():
                     "timeout_seconds": 0,
                     "max_retries": -1,
                     "retry_backoff_seconds": -0.1,
+                    "max_tokens": 0,
                 }
             }
         }
@@ -118,3 +132,4 @@ def test_validate_config_reports_bad_provider_runtime_values():
     assert any(issue.path == "providers.coder.timeout_seconds" for issue in issues)
     assert any(issue.path == "providers.coder.max_retries" for issue in issues)
     assert any(issue.path == "providers.coder.retry_backoff_seconds" for issue in issues)
+    assert any(issue.path == "providers.coder.max_tokens" for issue in issues)

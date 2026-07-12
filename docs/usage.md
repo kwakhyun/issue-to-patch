@@ -76,8 +76,9 @@ Operational controls:
 - `--check-timeout SECONDS`: override validation command timeout.
 - `--quiet` / `--verbose`: suppress summary or emit progress logs on stderr.
 
-Detailed attempt artifacts cap and redact check stdout/stderr. Solve metadata
-includes `schema_version`, `run_id`, `patch_provider`, and `fallback_used`.
+Detailed attempt artifacts cap and redact check stdout/stderr. Schema v2 solve
+metadata records the actual provider/model route, aggregate token usage, context
+counts, repair strategy, `patch_provider`, and `fallback_used`.
 
 ## Leaderboard
 
@@ -93,18 +94,22 @@ scores.
 
 ```bash
 gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --limit 10
+gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --resume --workers 4
 ```
 
 With `--solve`, each case must include `repo` and exactly one of `issue`,
 `issue_file`, or `issue_text`. The command runs the same isolated worktree
 solver used by `gia solve` and writes one run metadata record per case.
+Resume mode appends records while skipping existing `case_id` values.
 
 Docker sandbox defaults to `docker_network: none`. Docker runs can also be
-configured with `docker_read_only`, `docker_env`, and `docker_user` in
-`.gia.yaml`.
+configured with `docker_read_only`, `docker_env`, `docker_user`,
+`docker_setup_commands`, and writable `docker_tmpfs` mounts in `.gia.yaml`.
+SWE-bench prediction generation accepts `--evaluate-command` with
+`{predictions}` and `{dataset}` placeholders for an installed official harness.
 
 ## Release
 
-Push a tag such as `v0.1.0` to run the release workflow. The workflow builds the
-source distribution and wheel, checks package metadata, and attaches artifacts
-to a GitHub Release.
+Push a tag such as `v0.2.0` to run the release workflow. The workflow builds the
+source distribution and wheel, checks package metadata, smoke-tests a clean wheel
+installation, and attaches artifacts to a GitHub Release.

@@ -26,6 +26,7 @@ class ModelRouter:
         self.last_triage_response: ModelResponse | None = None
         self.last_patch_provider: str | None = None
         self.last_patch_provider_errors: list[dict[str, str]] = []
+        self.patch_provider_error_history: list[dict[str, str]] = []
 
     def choose_files(self, issue: Issue, tracked_files: list[str]) -> list[str]:
         provider = self._provider(self.config.router.triage_model)
@@ -60,12 +61,20 @@ class ModelRouter:
         file_context: str,
         current_diff: str,
         feedback: str | None,
+        repair_strategy: str = "replacement",
     ) -> ModelResponse:
+        patch_instruction = (
+            "Return a complete replacement diff against the original base revision. "
+            "The previous diff is feedback only and will not be present when this patch is applied."
+            if repair_strategy == "replacement"
+            else "Return an incremental diff that applies on top of the current worktree diff."
+        )
         user_prompt = (
             f"Issue:\n{issue.prompt_text()}\n\n"
             f"Relevant files:\n{file_context or '(no readable files selected)'}\n\n"
             f"Current diff already applied in the worktree:\n{current_diff or '(none)'}\n\n"
             f"Previous check feedback:\n{feedback or '(none)'}\n\n"
+            f"Patch strategy: {repair_strategy}. {patch_instruction}\n"
             "Return a unified git diff that can be applied with `git apply`."
         )
         errors: list[str] = []
@@ -87,6 +96,9 @@ class ModelRouter:
                 error = str(exc)
                 errors.append(error)
                 self.last_patch_provider_errors.append({"provider": provider.name, "error": error})
+                self.patch_provider_error_history.append(
+                    {"provider": provider.name, "error": error}
+                )
         raise ModelError("No patch provider succeeded: " + " | ".join(errors))
 
     def _patch_providers(self) -> list[ProviderConfig]:

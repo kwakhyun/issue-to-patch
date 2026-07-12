@@ -17,6 +17,14 @@ PATCH = """diff --git a/app.py b/app.py
 +VALUE = 2
 """
 
+PATCH_THREE = """diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1 +1 @@
+-VALUE = 1
++VALUE = 3
+"""
+
 
 class FakeOpenAIClient:
     def __init__(self, config):
@@ -55,6 +63,21 @@ class FallbackOpenAIClient:
         )
 
 
+class RepairOpenAIClient:
+    patch_calls = 0
+
+    def __init__(self, config):
+        self.config = config
+
+    def complete(self, messages, **kwargs):
+        if self.config.name == "triage":
+            text = '{"files": ["app.py"]}'
+        else:
+            type(self).patch_calls += 1
+            text = PATCH if self.patch_calls == 1 else PATCH_THREE
+        return ModelResponse(text=text, provider=self.config.name, model=self.config.model)
+
+
 def _init_repo(path):
     subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
     (path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -88,6 +111,20 @@ def test_solver_uses_worktree_and_returns_diff(monkeypatch, tmp_path):
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     assert result.metadata["attempt_count"] == 1
     assert result.metadata["cost_usd"] == 0.02
+    assert result.metadata["schema_version"] == "gia.solve.v2"
+    assert result.metadata["model_profile"] == "coder:Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    assert result.metadata["requested_model_profile"] is None
+    assert result.metadata["model_provider"] == "coder"
+    assert result.metadata["model"] == "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+    assert result.metadata["input_tokens"] == 20
+    assert result.metadata["output_tokens"] == 40
+    assert result.metadata["model_route"] == [
+        {
+            "provider": "coder",
+            "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+            "key": "coder:Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        }
+    ]
     assert result.metadata["triage"]["provider"] == "triage"
     assert result.metadata["allow_dirty"] is False
     assert result.metadata["base_ref"] == "HEAD"
@@ -113,6 +150,17 @@ def test_solver_refuses_dirty_repo_by_default(monkeypatch, tmp_path):
         assert "--allow-dirty" in str(exc)
     else:
         raise AssertionError("dirty repo should be rejected")
+
+
+def test_solver_rejects_invalid_config_before_worktree_creation(tmp_path):
+    config = config_from_mapping({"router": {"coder_model": "missing"}})
+
+    try:
+        IssueSolver(config=config, options=SolveOptions(sandbox="local"))
+    except GiaError as exc:
+        assert "router.coder_model" in str(exc)
+    else:
+        raise AssertionError("invalid config should be rejected")
 
 
 def test_solver_allows_dirty_repo_when_explicit(monkeypatch, tmp_path):
@@ -177,6 +225,32 @@ def test_solver_empty_checks_records_unchecked(monkeypatch, tmp_path):
     assert result.status == "unchecked"
     assert result.attempts[0].failure_stage == "checks"
     assert result.attempts[0].error == "no_checks_configured"
+
+
+def test_solver_replacement_repairs_are_applied_against_base(monkeypatch, tmp_path):
+    _init_repo(tmp_path)
+    RepairOpenAIClient.patch_calls = 0
+    monkeypatch.setattr("issue_agent.router.OpenAICompatibleClient", RepairOpenAIClient)
+    check = (
+        f"{sys.executable} -c "
+        "\"from pathlib import Path; assert Path('app.py').read_text() == 'VALUE = 3\\n'\""
+    )
+    config = config_from_mapping({"checks": {"commands": [check]}})
+    solver = IssueSolver(
+        config=config,
+        options=SolveOptions(sandbox="local", max_iters=2, repair_strategy="replacement"),
+    )
+
+    result = solver.solve(
+        repo=tmp_path,
+        issue=Issue(title="Update value", body="Change VALUE to 3", source="test"),
+    )
+
+    assert result.resolved
+    assert result.metadata["repair_strategy"] == "replacement"
+    assert result.metadata["attempt_count"] == 2
+    assert "+VALUE = 3" in result.diff
+    assert "+VALUE = 2" not in result.diff
 
 
 def test_solver_records_fallback_provider_metadata(monkeypatch, tmp_path):

@@ -67,6 +67,7 @@ gia solve \
   --issue https://github.com/owner/repo/issues/123 \
   --sandbox local \
   --max-iters 3 \
+  --repair-strategy replacement \
   --run-dir .gia-runs/issue-123 \
   --out-diff fix.patch \
   --metadata-out runs.jsonl
@@ -79,6 +80,9 @@ GitHub CLI가 있을 때 `gh issue view`로 가져옵니다.
 
 검증 명령을 Docker container 안에서 실행하려면 `--sandbox docker`를 사용합니다.
 기본값은 local mode이며, 실행 metadata에도 명시적으로 기록됩니다.
+일반 Python 이미지에 프로젝트 의존성이 없다면 `sandbox.docker_setup_commands`로
+설치 명령을 지정해야 합니다. 설치에 네트워크가 필요하면 기본값 `none` 대신
+허용할 `docker_network`도 명시적으로 설정하세요.
 
 기본적으로 `gia solve`는 대상 저장소에 uncommitted change가 있으면 실행을
 거부합니다. 현재 `HEAD` 기준으로 worktree를 만들되 관련 없는 로컬 변경은
@@ -96,14 +100,18 @@ patch는 적용 전에 `git apply --check`로 dry-run 검증됩니다.
 
 - `--base-ref REF`: 특정 ref에서 격리 worktree를 생성합니다.
 - `--keep-worktree never|on-failure|always`: 임시 worktree를 inspection용으로 보존합니다.
+- `--repair-strategy replacement|incremental`: 기본 `replacement`는 각 후보를 원래
+  base ref에 독립적으로 적용하고, `incremental`은 이전 후보 위에 누적합니다.
 - `--check-command CMD`: 설정 파일의 checks를 override합니다. 여러 번 지정할 수 있습니다.
+- `--context-max-files`, `--context-max-chars`: issue 기반 파일 검색과 prompt 크기를 제한합니다.
 - `--skip-checks`: 유효한 patch를 적용하되 `status=unchecked`로 기록합니다. unchecked
   run은 CI가 resolved로 오해하지 않도록 exit code 2를 반환합니다.
 - `--quiet`: stderr summary를 숨깁니다.
 - `--verbose`: 진행 로그를 stderr에 출력합니다.
 
-실행 metadata에는 `schema_version`, `run_id`, `patch_provider`,
-`fallback_used`, compact attempt 기록이 포함됩니다. 상세 attempt artifact는
+schema v2 metadata에는 실제 `model_provider`, `model`, `model_route`, 전체 token,
+`patch_provider`, `fallback_used`, compact attempt 기록이 포함됩니다. leaderboard는
+실제 patch 생성 provider/model을 우선 집계합니다. 상세 attempt artifact는
 check stdout/stderr를 size cap과 secret redaction을 거쳐 저장합니다. metadata가
 생성되기 전에 실패하면 `--run-dir`에 `error.json`을 쓰며, `--error-out PATH`로
 명시적인 error artifact 경로를 지정할 수 있습니다.
@@ -150,6 +158,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 ```
 
 외부 fallback provider는 opt-in입니다. 로컬 모델 stack 밖의 네트워크 fallback을
@@ -168,15 +178,21 @@ sandbox:
 gia bench swebench --dataset lite --cases cases.jsonl --limit 10 --predictions preds.jsonl
 gia bench korean --cases korean_cases.jsonl --out runs.jsonl
 gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --limit 10
+gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --resume --workers 4
+gia bench swebench --dataset lite --cases cases.jsonl --predictions preds.jsonl \
+  --evaluate-command 'python -m swebench.harness.run_evaluation --predictions_path {predictions}'
 gia leaderboard --runs runs.jsonl --sort resolved_per_dollar
 ```
 
 SWE-bench 명령은 공식 harness shape와 호환되는 prediction JSONL을 작성합니다.
 필드는 `instance_id`, `model_name_or_path`, `model_patch`입니다. 이 명령은 공식
 Docker evaluation harness를 대체하지 않습니다.
+`--evaluate-command`는 `{predictions}`와 `{dataset}`을 확장해 설치된 공식 harness를
+shell 없이 호출합니다.
 
 `gia bench korean --solve`는 case에 `repo`와 `issue`, `issue_file`,
 `issue_text` 중 하나가 포함되어 있을 때 각 case를 local solver로 실행합니다.
+`--resume`은 기존 `case_id`를 건너뛰고, `--workers`는 독립 case를 병렬 실행합니다.
 
 ## 개발
 

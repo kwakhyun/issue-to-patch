@@ -42,6 +42,8 @@ def test_config_from_mapping_overrides_nested_values():
                 "docker_read_only": True,
                 "docker_env": ["PIP_INDEX_URL"],
                 "docker_user": "1000:1000",
+                "docker_setup_commands": ["python -m pip install -e ."],
+                "docker_tmpfs": ["/tmp", "/run"],
             },
         }
     )
@@ -59,6 +61,19 @@ def test_config_from_mapping_overrides_nested_values():
     assert config.sandbox.docker_read_only is True
     assert config.sandbox.docker_env == ("PIP_INDEX_URL",)
     assert config.sandbox.docker_user == "1000:1000"
+    assert config.sandbox.docker_setup_commands == ("python -m pip install -e .",)
+    assert config.sandbox.docker_tmpfs == ("/tmp", "/run")
+
+
+def test_validate_config_reports_invalid_docker_lifecycle_values():
+    config = config_from_mapping(
+        {"sandbox": {"docker_setup_commands": [""], "docker_tmpfs": ["relative"]}}
+    )
+
+    issues = validate_config(config)
+
+    assert any(issue.path == "sandbox.docker_setup_commands.0" for issue in issues)
+    assert any(issue.path == "sandbox.docker_tmpfs.0" for issue in issues)
 
 
 def test_simple_yaml_fallback_shape(tmp_path):

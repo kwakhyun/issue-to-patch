@@ -2,8 +2,14 @@ import json
 import subprocess
 import sys
 
-from issue_agent.bench import summarize_korean_benchmark, write_swebench_predictions
+from issue_agent.bench import (
+    run_korean_benchmark,
+    run_swebench_harness,
+    summarize_korean_benchmark,
+    write_swebench_predictions,
+)
 from issue_agent.cli import main
+from issue_agent.errors import GiaError
 from issue_agent.metrics import compute_leaderboard, format_leaderboard, sort_leaderboard
 from issue_agent.models import ModelResponse
 
@@ -61,6 +67,32 @@ def test_compute_leaderboard_zero_cost_and_paid():
     assert "resolved/$" in format_leaderboard(rows)
 
 
+def test_compute_leaderboard_prefers_actual_provider_and_model():
+    rows = compute_leaderboard(
+        [
+            {
+                "model_profile": "requested-profile",
+                "model_provider": "ollama",
+                "model": "qwen3-coder",
+                "resolved": True,
+                "cost_usd": 0,
+            },
+            {
+                "model_profile": "requested-profile",
+                "model_provider": "vllm",
+                "model": "deepseek-coder",
+                "resolved": False,
+                "cost_usd": 0,
+            },
+        ]
+    )
+
+    assert {row.model_profile for row in rows} == {
+        "ollama:qwen3-coder",
+        "vllm:deepseek-coder",
+    }
+
+
 def test_write_swebench_predictions(tmp_path):
     cases = tmp_path / "cases.jsonl"
     cases.write_text(
@@ -77,6 +109,41 @@ def test_write_swebench_predictions(tmp_path):
     assert count == 1
     assert line["instance_id"] == "x"
     assert line["model_name_or_path"] == "m"
+
+
+def test_swebench_harness_adapter_expands_placeholders(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    predictions = tmp_path / "predictions.jsonl"
+
+    code = run_swebench_harness(
+        command="python -m harness --predictions {predictions} --dataset {dataset}",
+        predictions_path=predictions,
+        dataset="lite",
+    )
+
+    assert code == 0
+    assert str(predictions.resolve()) in captured["args"]
+    assert captured["args"][-1] == "lite"
+
+
+def test_swebench_harness_rejects_non_positive_timeout(tmp_path):
+    try:
+        run_swebench_harness(
+            command="python -V",
+            predictions_path=tmp_path / "predictions.jsonl",
+            dataset="lite",
+            timeout_seconds=0,
+        )
+    except GiaError as exc:
+        assert "timeout must be positive" in str(exc)
+    else:
+        raise AssertionError("non-positive timeout should be rejected")
 
 
 def test_summarize_korean_benchmark(tmp_path):
@@ -122,7 +189,7 @@ def test_cli_version(capsys):
     except SystemExit as exc:
         assert exc.code == 0
 
-    assert "gia 0.1.0" in capsys.readouterr().out
+    assert "gia 0.2.0" in capsys.readouterr().out
 
 
 def test_cli_init_config(tmp_path, capsys):
@@ -322,3 +389,30 @@ def test_cli_korean_benchmark_can_run_solve(monkeypatch, tmp_path):
     assert record["benchmark"] == "korean"
     assert record["case_id"] == "kr-1"
     assert record["status"] == "unchecked"
+
+
+def test_korean_benchmark_resume_skips_completed_cases(tmp_path):
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "kr-1", "repo": str(tmp_path), "issue_text": "one"}),
+                json.dumps({"id": "kr-2", "repo": None, "issue_text": "two"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "runs.jsonl"
+    out.write_text(json.dumps({"case_id": "kr-1", "status": "resolved"}) + "\n")
+
+    count = run_korean_benchmark(
+        cases_path=cases,
+        out_path=out,
+        resume=True,
+        workers=2,
+    )
+
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert count == 1
+    assert [record["case_id"] for record in records] == ["kr-1", "kr-2"]

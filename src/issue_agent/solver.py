@@ -9,22 +9,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from .config import Config
+from .config import Config, validate_config
 from .errors import GiaError, ModelError, PatchError
 from .executor import CommandResult, CommandRunner, summarize_results
 from .gitops import (
     IsolatedWorktree,
     current_diff,
+    discover_context_files,
     is_dirty,
     list_tracked_files,
     read_selected_files,
+    reset_worktree,
 )
 from .issue import Issue
 from .patches import apply_unified_diff, check_unified_diff, extract_unified_diff
 from .router import ModelRouter
 
 KeepWorktree = Literal["never", "on-failure", "always"]
-SOLVE_METADATA_SCHEMA_VERSION = "gia.solve.v1"
+RepairStrategy = Literal["replacement", "incremental"]
+SOLVE_METADATA_SCHEMA_VERSION = "gia.solve.v2"
 ATTEMPT_OUTPUT_LIMIT = 64_000
 
 
@@ -37,9 +40,12 @@ class SolveOptions:
     allow_dirty: bool = False
     base_ref: str = "HEAD"
     keep_worktree: KeepWorktree = "never"
+    repair_strategy: RepairStrategy = "replacement"
     check_commands: tuple[str, ...] | None = None
     skip_checks: bool = False
     check_timeout_seconds: int | None = None
+    context_max_files: int = 400
+    context_max_chars: int = 120_000
     event_callback: Callable[[str], None] | None = None
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -48,8 +54,14 @@ class SolveOptions:
             raise GiaError("max-iters must be >= 1")
         if self.keep_worktree not in {"never", "on-failure", "always"}:
             raise GiaError("keep-worktree must be one of: never, on-failure, always")
+        if self.repair_strategy not in {"replacement", "incremental"}:
+            raise GiaError("repair-strategy must be one of: replacement, incremental")
         if self.check_timeout_seconds is not None and self.check_timeout_seconds <= 0:
             raise GiaError("check-timeout must be positive")
+        if self.context_max_files <= 0:
+            raise GiaError("context-max-files must be positive")
+        if self.context_max_chars <= 0:
+            raise GiaError("context-max-chars must be positive")
 
 
 @dataclass(frozen=True)
@@ -114,6 +126,10 @@ class IssueSolver:
         config: Config,
         options: SolveOptions,
     ) -> None:
+        config_errors = [issue for issue in validate_config(config) if issue.severity == "error"]
+        if config_errors:
+            details = "; ".join(f"{issue.path}: {issue.message}" for issue in config_errors)
+            raise GiaError(f"Invalid configuration: {details}")
         self.config = config
         self.options = options
 
@@ -138,11 +154,21 @@ class IssueSolver:
             router = ModelRouter(self.config, model_profile=self.options.model_profile)
             self._emit("triaging repository files")
             tracked_files = list_tracked_files(worktree.path)
-            selected_files = router.choose_files(issue, tracked_files)
+            context_candidates = discover_context_files(
+                worktree.path,
+                issue.prompt_text(),
+                tracked_files,
+                max_files=self.options.context_max_files,
+            )
+            selected_files = router.choose_files(issue, context_candidates)
             self._emit(f"selected {len(selected_files)} files for context")
             if router.last_triage_response:
                 total_cost += router.last_triage_response.cost_usd
-            file_context = read_selected_files(worktree.path, selected_files)
+            file_context = read_selected_files(
+                worktree.path,
+                selected_files,
+                max_total_chars=self.options.context_max_chars,
+            )
             feedback: str | None = None
             check_commands = (
                 self.options.check_commands
@@ -174,14 +200,23 @@ class IssueSolver:
                         file_context=file_context,
                         current_diff=current_diff(worktree.path),
                         feedback=feedback,
+                        repair_strategy=self.options.repair_strategy,
                     )
                     total_cost += response.cost_usd
                     failure_stage = "extract_patch"
                     patch = extract_unified_diff(response.text)
                     patch_valid = True
+                    previous_diff = current_diff(worktree.path)
+                    if self.options.repair_strategy == "replacement":
+                        self._emit(f"iteration {iteration}: replacing previous candidate")
+                        reset_worktree(worktree.path)
                     failure_stage = "patch_dry_run"
                     self._emit(f"iteration {iteration}: dry-run checking patch")
-                    check_unified_diff(worktree.path, patch)
+                    try:
+                        check_unified_diff(worktree.path, patch)
+                    except PatchError:
+                        _restore_candidate(worktree.path, previous_diff)
+                        raise
                     patch_dry_run_passed = True
                     if self.options.diff_only:
                         final_diff = patch
@@ -202,7 +237,11 @@ class IssueSolver:
                         break
                     failure_stage = "apply_patch"
                     self._emit(f"iteration {iteration}: applying patch")
-                    apply_unified_diff(worktree.path, patch)
+                    try:
+                        apply_unified_diff(worktree.path, patch)
+                    except PatchError:
+                        _restore_candidate(worktree.path, previous_diff)
+                        raise
                     patch_applied = True
                     if self.options.skip_checks:
                         final_diff = current_diff(worktree.path)
@@ -293,6 +332,12 @@ class IssueSolver:
             if status == "failed" and attempts:
                 status = "unresolved"
 
+            model_identity = _effective_model_identity(attempts)
+            input_tokens = sum(attempt.input_tokens for attempt in attempts)
+            output_tokens = sum(attempt.output_tokens for attempt in attempts)
+            if router.last_triage_response:
+                input_tokens += router.last_triage_response.input_tokens
+                output_tokens += router.last_triage_response.output_tokens
             metadata = {
                 "schema_version": SOLVE_METADATA_SCHEMA_VERSION,
                 "run_id": self.options.run_id,
@@ -302,25 +347,37 @@ class IssueSolver:
                 "resolved": resolved,
                 "status": status,
                 "sandbox": self.options.sandbox,
-                "model_profile": self.options.model_profile,
+                "model_profile": model_identity["key"],
+                "requested_model_profile": self.options.model_profile,
+                "model_provider": model_identity["provider"],
+                "model": model_identity["model"],
+                "model_route": _model_route(attempts),
                 "max_iters": self.options.max_iters,
                 "allow_dirty": self.options.allow_dirty,
                 "base_ref": self.options.base_ref,
                 "keep_worktree": self.options.keep_worktree,
+                "repair_strategy": self.options.repair_strategy,
                 "kept_worktree": _should_keep_worktree(
                     self.options.keep_worktree, status, resolved
                 ),
                 "attempt_count": len(attempts),
                 "cost_usd": total_cost,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "triage": _model_response_metadata(router.last_triage_response),
-                "patch_provider": router.last_patch_provider,
+                "patch_provider": model_identity["provider"],
                 "patch_provider_errors": router.last_patch_provider_errors,
+                "patch_provider_error_history": router.patch_provider_error_history,
                 "fallback_used": _fallback_used(self.config.router.fallback_model, attempts),
                 "duration_seconds": time.monotonic() - start,
                 "original_dirty": original_dirty,
                 "worktree_path": str(worktree.path),
                 "worktree_branch": worktree.branch,
                 "selected_files": selected_files,
+                "tracked_file_count": len(tracked_files),
+                "context_candidate_count": len(context_candidates),
+                "context_max_files": self.options.context_max_files,
+                "context_max_chars": self.options.context_max_chars,
                 "check_commands": list(check_commands),
                 "checks_skipped": self.options.skip_checks,
                 "check_timeout_seconds": (
@@ -424,6 +481,58 @@ def _fallback_used(fallback_model: str | None, attempts: list[AttemptRecord]) ->
     if not fallback_model:
         return False
     return any(attempt.provider == fallback_model for attempt in attempts)
+
+
+def _effective_model_identity(attempts: list[AttemptRecord]) -> dict[str, str | None]:
+    for attempt in reversed(attempts):
+        if (attempt.patch_applied or attempt.patch_dry_run_passed) and (
+            attempt.provider or attempt.model
+        ):
+            provider = attempt.provider
+            model = attempt.model
+            return {
+                "provider": provider,
+                "model": model,
+                "key": _model_key(provider, model),
+            }
+    for attempt in reversed(attempts):
+        if attempt.provider or attempt.model:
+            return {
+                "provider": attempt.provider,
+                "model": attempt.model,
+                "key": _model_key(attempt.provider, attempt.model),
+            }
+    return {"provider": None, "model": None, "key": "unknown"}
+
+
+def _model_route(attempts: list[AttemptRecord]) -> list[dict[str, str | None]]:
+    route: list[dict[str, str | None]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    for attempt in attempts:
+        identity = (attempt.provider, attempt.model)
+        if identity == (None, None) or identity in seen:
+            continue
+        seen.add(identity)
+        route.append(
+            {
+                "provider": attempt.provider,
+                "model": attempt.model,
+                "key": _model_key(attempt.provider, attempt.model),
+            }
+        )
+    return route
+
+
+def _model_key(provider: str | None, model: str | None) -> str:
+    if provider and model:
+        return f"{provider}:{model}"
+    return provider or model or "unknown"
+
+
+def _restore_candidate(repo: str | Path, diff: str) -> None:
+    reset_worktree(repo)
+    if diff:
+        apply_unified_diff(repo, diff)
 
 
 def _sanitize_output(value: str, *, limit: int) -> str:

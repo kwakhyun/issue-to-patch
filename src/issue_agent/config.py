@@ -65,6 +65,8 @@ class SandboxConfig:
     docker_read_only: bool = False
     docker_env: tuple[str, ...] = ()
     docker_user: str | None = None
+    docker_setup_commands: tuple[str, ...] = ()
+    docker_tmpfs: tuple[str, ...] = ("/tmp",)
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 """
 
 OLLAMA_CONFIG = """providers:
@@ -155,6 +159,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 """
 
 VLLM_CONFIG = """providers:
@@ -190,6 +196,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 """
 
 OPENAI_COMPATIBLE_CONFIG = """providers:
@@ -220,6 +228,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 """
 
 CONFIG_PRESETS = {
@@ -310,6 +320,14 @@ def config_from_mapping(data: dict[str, Any], base: Config | None = None) -> Con
             docker_env_tuple = tuple(str(item) for item in docker_env)
         else:
             raise ConfigError("sandbox.docker_env must be a string or list of strings")
+        docker_setup_commands = _string_tuple(
+            raw_sandbox.get("docker_setup_commands", sandbox.docker_setup_commands),
+            "sandbox.docker_setup_commands",
+        )
+        docker_tmpfs = _string_tuple(
+            raw_sandbox.get("docker_tmpfs", sandbox.docker_tmpfs),
+            "sandbox.docker_tmpfs",
+        )
         sandbox = replace(
             sandbox,
             default=str(raw_sandbox.get("default", sandbox.default)),
@@ -321,6 +339,8 @@ def config_from_mapping(data: dict[str, Any], base: Config | None = None) -> Con
             ),
             docker_env=docker_env_tuple,
             docker_user=_optional_str(raw_sandbox.get("docker_user", sandbox.docker_user)),
+            docker_setup_commands=docker_setup_commands,
+            docker_tmpfs=docker_tmpfs,
         )
         if sandbox.default not in {"local", "docker"}:
             raise ConfigError("sandbox.default must be 'local' or 'docker'")
@@ -439,6 +459,16 @@ def validate_config(config: Config) -> list[ConfigIssue]:
     for index, name in enumerate(config.sandbox.docker_env):
         if not name:
             issues.append(ConfigIssue("error", f"sandbox.docker_env.{index}", "env name is empty"))
+    for index, command in enumerate(config.sandbox.docker_setup_commands):
+        if not command.strip():
+            issues.append(
+                ConfigIssue("error", f"sandbox.docker_setup_commands.{index}", "command is empty")
+            )
+    for index, mount in enumerate(config.sandbox.docker_tmpfs):
+        if not mount.startswith("/"):
+            issues.append(
+                ConfigIssue("error", f"sandbox.docker_tmpfs.{index}", "must be an absolute path")
+            )
 
     return issues
 
@@ -572,6 +602,14 @@ def _as_bool(value: Any) -> bool:
         if value.lower() in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _string_tuple(value: Any, name: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, list | tuple):
+        return tuple(str(item) for item in value)
+    raise ConfigError(f"{name} must be a string or list of strings")
 
 
 def _optional_str(value: Any) -> str | None:

@@ -23,9 +23,15 @@ jobs:
         run: python -m build
       - name: Check package metadata
         run: twine check dist/*
+      - name: Smoke test wheel
+        run: |
+          python -m venv /tmp/gia-release-smoke
+          /tmp/gia-release-smoke/bin/pip install dist/*.whl
+          /tmp/gia-release-smoke/bin/gia --version
+          VERSION=$(/tmp/gia-release-smoke/bin/gia --version | awk '{print $2}')
+          test "$GITHUB_REF_NAME" = "v$VERSION"
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
-

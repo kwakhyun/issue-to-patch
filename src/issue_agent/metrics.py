@@ -29,7 +29,7 @@ def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
 def compute_leaderboard(records: list[dict[str, Any]]) -> list[LeaderboardRow]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for record in records:
-        key = str(record.get("model_profile") or record.get("model") or "default")
+        key = _record_model_key(record)
         groups.setdefault(key, []).append(record)
     rows: list[LeaderboardRow] = []
     for key, group in groups.items():
@@ -47,6 +47,17 @@ def compute_leaderboard(records: list[dict[str, Any]]) -> list[LeaderboardRow]:
             )
         )
     return rows
+
+
+def _record_model_key(record: dict[str, Any]) -> str:
+    explicit = record.get("model_key")
+    if explicit:
+        return str(explicit)
+    provider = record.get("model_provider")
+    model = record.get("model")
+    if provider and model:
+        return f"{provider}:{model}"
+    return str(record.get("model_profile") or model or provider or "default")
 
 
 def sort_leaderboard(

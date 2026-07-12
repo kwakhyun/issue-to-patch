@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import shlex
+import subprocess
+import threading
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +14,9 @@ from .errors import GiaError
 from .issue import load_issue
 from .metrics import load_jsonl
 from .solver import IssueSolver, SolveOptions
+
+_REPO_LOCKS: dict[str, threading.Lock] = {}
+_REPO_LOCKS_GUARD = threading.Lock()
 
 
 def write_swebench_predictions(
@@ -43,6 +51,34 @@ def write_swebench_predictions(
     return len(records)
 
 
+def run_swebench_harness(
+    *,
+    command: str,
+    predictions_path: str | Path,
+    dataset: str,
+    timeout_seconds: int = 7200,
+) -> int:
+    if timeout_seconds <= 0:
+        raise GiaError("SWE-bench harness timeout must be positive")
+    values = {
+        "predictions": str(Path(predictions_path).expanduser().resolve()),
+        "dataset": dataset,
+    }
+    try:
+        args = [part.format(**values) for part in shlex.split(command)]
+    except (KeyError, ValueError) as exc:
+        raise GiaError(f"Invalid SWE-bench harness command template: {exc}") from exc
+    if not args:
+        raise GiaError("SWE-bench harness command cannot be empty")
+    try:
+        result = subprocess.run(args, text=True, check=False, timeout=timeout_seconds)
+    except FileNotFoundError as exc:
+        raise GiaError(f"SWE-bench harness executable was not found: {args[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GiaError(f"SWE-bench harness timed out after {timeout_seconds}s") from exc
+    return result.returncode
+
+
 def summarize_korean_benchmark(*, cases_path: str | Path, out_path: str | Path) -> int:
     cases = _load_cases(cases_path)
     output = Path(out_path).expanduser().resolve()
@@ -75,15 +111,25 @@ def run_korean_benchmark(
     allow_dirty: bool = False,
     skip_checks: bool = False,
     check_commands: tuple[str, ...] | None = None,
+    resume: bool = False,
+    workers: int = 1,
 ) -> int:
+    if workers < 1:
+        raise GiaError("benchmark workers must be >= 1")
     cases = _load_cases(cases_path)
     if limit is not None:
         cases = cases[:limit]
     output = Path(out_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8") as file:
-        for index, case in enumerate(cases):
-            record = _solve_korean_case(
+    completed = _completed_case_ids(output) if resume else set()
+    pending = [
+        (index, case) for index, case in enumerate(cases) if _case_id(case, index) not in completed
+    ]
+
+    def solve_case(item: tuple[int, dict[str, Any]]) -> dict[str, Any]:
+        index, case = item
+        try:
+            return _solve_korean_case(
                 case=case,
                 index=index,
                 sandbox=sandbox,
@@ -94,8 +140,29 @@ def run_korean_benchmark(
                 skip_checks=skip_checks,
                 check_commands=check_commands,
             )
-            file.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    return len(cases)
+        except Exception as exc:  # noqa: BLE001 - one case must not abort a benchmark batch.
+            return _korean_error_record(
+                case_id=_case_id(case, index),
+                repo=_optional_case_str(case.get("repo")),
+                message=f"{exc.__class__.__name__}: {exc}",
+            )
+
+    mode = "a" if resume and output.exists() else "w"
+    with output.open(mode, encoding="utf-8") as file:
+        records: Iterable[dict[str, Any]]
+        if workers == 1:
+            records = map(solve_case, pending)
+        else:
+            executor = ThreadPoolExecutor(max_workers=workers)
+            records = executor.map(solve_case, pending)
+        try:
+            for record in records:
+                file.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                file.flush()
+        finally:
+            if workers != 1:
+                executor.shutdown(wait=True)
+    return len(pending)
 
 
 def _solve_korean_case(
@@ -110,7 +177,7 @@ def _solve_korean_case(
     skip_checks: bool,
     check_commands: tuple[str, ...] | None,
 ) -> dict[str, Any]:
-    case_id = str(case.get("id") or case.get("instance_id") or f"korean-{index}")
+    case_id = _case_id(case, index)
     repo = case.get("repo")
     if not repo:
         return _korean_error_record(case_id=case_id, repo=None, message="case.repo is required")
@@ -133,7 +200,8 @@ def _solve_korean_case(
                 check_commands=check_commands,
             ),
         )
-        result = solver.solve(repo=str(repo), issue=issue)
+        with _repo_lock(str(repo)):
+            result = solver.solve(repo=str(repo), issue=issue)
     except GiaError as exc:
         return _korean_error_record(case_id=case_id, repo=str(repo), message=str(exc))
     record = dict(result.metadata)
@@ -160,6 +228,26 @@ def _optional_case_str(value: Any) -> str | None:
         return None
     text = str(value)
     return text or None
+
+
+def _case_id(case: dict[str, Any], index: int) -> str:
+    return str(case.get("id") or case.get("instance_id") or f"korean-{index}")
+
+
+def _completed_case_ids(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {
+        str(record.get("case_id"))
+        for record in load_jsonl(path)
+        if record.get("case_id") is not None
+    }
+
+
+def _repo_lock(repo: str) -> threading.Lock:
+    key = str(Path(repo).expanduser().resolve())
+    with _REPO_LOCKS_GUARD:
+        return _REPO_LOCKS.setdefault(key, threading.Lock())
 
 
 def _load_cases(cases_path: str | Path | None) -> list[dict[str, Any]]:

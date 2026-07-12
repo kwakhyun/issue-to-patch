@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The project follows semantic versioning once tagged releases begin.
 
-## 0.1.0 - Unreleased
+## 0.2.0 - Unreleased
+
+- Added metadata schema v2 with actual provider/model routing, aggregate token usage,
+  and model-level leaderboard attribution.
+- Added replacement-first repair attempts with an incremental compatibility mode.
+- Added Docker setup commands and writable tmpfs lifecycle configuration.
+- Added issue-ranked large-repository context discovery and explicit context budgets.
+- Added resumable and parallel Korean benchmark runs plus a SWE-bench harness adapter.
+- Added automatic solve-time config validation, Python 3.13 CI, and release smoke tests.
+
+## 0.1.0 - Initial development
 
 - Initial local-first GitHub issue agent scaffold.
 - Added issue ingestion, git worktree isolation, OpenAI-compatible providers,

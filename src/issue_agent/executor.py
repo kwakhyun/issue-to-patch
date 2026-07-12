@@ -101,18 +101,21 @@ class CommandRunner:
         ]
         if self.sandbox_config.docker_read_only:
             docker_command.append("--read-only")
+        for mount in self.sandbox_config.docker_tmpfs:
+            docker_command.extend(["--tmpfs", mount])
         docker_user = _docker_user(self.sandbox_config.docker_user)
         if docker_user:
             docker_command.extend(["--user", docker_user])
         for name in self.sandbox_config.docker_env:
             if name in os.environ:
                 docker_command.extend(["-e", name])
+        shell_command = " && ".join([*self.sandbox_config.docker_setup_commands, command])
         docker_command.extend(
             [
                 self.sandbox_config.docker_image,
                 "sh",
                 "-lc",
-                command,
+                shell_command,
             ]
         )
         try:

@@ -8,7 +8,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import __version__
-from .bench import run_korean_benchmark, summarize_korean_benchmark, write_swebench_predictions
+from .bench import (
+    run_korean_benchmark,
+    run_swebench_harness,
+    summarize_korean_benchmark,
+    write_swebench_predictions,
+)
 from .config import available_config_presets, load_config, sample_config_text, validate_config
 from .diagnostics import format_doctor_report, run_doctor
 from .errors import GiaError
@@ -57,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preserve the temporary worktree for debugging",
     )
     solve.add_argument(
+        "--repair-strategy",
+        choices=["replacement", "incremental"],
+        default="replacement",
+        help="Replace the full candidate patch or apply incremental repairs",
+    )
+    solve.add_argument(
         "--check-command",
         dest="check_commands",
         action="append",
@@ -71,6 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--check-timeout",
         type=int,
         help="Override the validation command timeout in seconds",
+    )
+    solve.add_argument(
+        "--context-max-files",
+        type=int,
+        default=400,
+        help="Maximum issue-ranked files offered to the triage model",
+    )
+    solve.add_argument(
+        "--context-max-chars",
+        type=int,
+        default=120_000,
+        help="Maximum source characters included in the coding prompt",
     )
     output_group = solve.add_mutually_exclusive_group()
     output_group.add_argument("--quiet", action="store_true", help="Suppress stderr summary")
@@ -95,6 +118,11 @@ def build_parser() -> argparse.ArgumentParser:
     swebench.add_argument("--predictions", required=True)
     swebench.add_argument("--cases", help="Local SWE-bench-style cases JSON/JSONL")
     swebench.add_argument("--model-name", default="gia-local")
+    swebench.add_argument(
+        "--evaluate-command",
+        help="Official harness command template using {predictions} and {dataset}",
+    )
+    swebench.add_argument("--harness-timeout", type=int, default=7200)
     swebench.set_defaults(func=_bench_swebench)
 
     korean = bench_subparsers.add_parser("korean", help="Summarize Korean issue benchmark cases")
@@ -108,6 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
     korean.add_argument("--max-iters", type=int, default=3)
     korean.add_argument("--allow-dirty", action="store_true")
     korean.add_argument("--skip-checks", action="store_true")
+    korean.add_argument("--resume", action="store_true", help="Append and skip completed case IDs")
+    korean.add_argument("--workers", type=int, default=1, help="Parallel case workers")
     korean.add_argument(
         "--check-command",
         dest="check_commands",
@@ -193,9 +223,12 @@ def _solve(args: argparse.Namespace) -> int:
             allow_dirty=args.allow_dirty,
             base_ref=args.base_ref,
             keep_worktree=args.keep_worktree,
+            repair_strategy=args.repair_strategy,
             check_commands=tuple(args.check_commands) if args.check_commands else None,
             skip_checks=args.skip_checks,
             check_timeout_seconds=args.check_timeout,
+            context_max_files=args.context_max_files,
+            context_max_chars=args.context_max_chars,
             event_callback=log if args.verbose else None,
             run_id=run_id,
         )
@@ -225,6 +258,15 @@ def _bench_swebench(args: argparse.Namespace) -> int:
         model_name=args.model_name,
     )
     print(f"wrote {count} predictions to {args.predictions}")
+    if args.evaluate_command:
+        returncode = run_swebench_harness(
+            command=args.evaluate_command,
+            predictions_path=args.predictions,
+            dataset=args.dataset,
+            timeout_seconds=args.harness_timeout,
+        )
+        if returncode != 0:
+            raise GiaError(f"SWE-bench harness failed with exit code {returncode}")
     return 0
 
 
@@ -241,6 +283,8 @@ def _bench_korean(args: argparse.Namespace) -> int:
             allow_dirty=args.allow_dirty,
             skip_checks=args.skip_checks,
             check_commands=tuple(args.check_commands) if args.check_commands else None,
+            resume=args.resume,
+            workers=args.workers,
         )
     else:
         count = summarize_korean_benchmark(cases_path=args.cases, out_path=args.out)

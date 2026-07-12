@@ -3,7 +3,13 @@ import sys
 
 from issue_agent.config import SandboxConfig
 from issue_agent.executor import CommandRunner
-from issue_agent.gitops import IsolatedWorktree, current_diff, is_dirty
+from issue_agent.gitops import (
+    IsolatedWorktree,
+    current_diff,
+    discover_context_files,
+    is_dirty,
+    list_tracked_files,
+)
 
 
 def _init_repo(path):
@@ -94,6 +100,8 @@ def test_command_runner_docker_hardening_options(monkeypatch, tmp_path):
             docker_read_only=True,
             docker_env=("PIP_INDEX_URL", "MISSING_ENV"),
             docker_user="1000:1000",
+            docker_setup_commands=("python -m pip install -e .",),
+            docker_tmpfs=("/tmp", "/run"),
         ),
         timeout_seconds=10,
     )
@@ -105,8 +113,31 @@ def test_command_runner_docker_hardening_options(monkeypatch, tmp_path):
     assert command[0:4] == ["docker", "run", "--rm", "--network"]
     assert "none" in command
     assert "--read-only" in command
+    assert command.count("--tmpfs") == 2
     assert command[command.index("--user") + 1] == "1000:1000"
     assert "-e" in command
     assert "PIP_INDEX_URL" in command
     assert "MISSING_ENV" not in command
     assert any(str(tmp_path.resolve()) in part and part.endswith(":ro") for part in command)
+    assert command[-1] == "python -m pip install -e . && python -V"
+
+
+def test_context_discovery_finds_issue_match_beyond_legacy_file_limit(tmp_path):
+    _init_repo(tmp_path)
+    for index in range(320):
+        path = tmp_path / f"module_{index:03}.py"
+        path.write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+    target = tmp_path / "z_target.py"
+    target.write_text("class UniqueWidgetResolver:\n    pass\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+
+    tracked = list_tracked_files(tmp_path)
+    candidates = discover_context_files(
+        tmp_path,
+        "UniqueWidgetResolver가 결과를 반환하지 않습니다",
+        tracked,
+        max_files=20,
+    )
+
+    assert len(tracked) > 300
+    assert "z_target.py" in candidates

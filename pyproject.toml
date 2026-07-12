@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "issue-to-patch"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Local-first CLI agent for solving Python GitHub issues with patch/test/repair loops."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,7 @@ yaml = [
   "PyYAML>=6",
 ]
 dev = [
+  "setuptools>=77",
   "pytest>=8",
   "ruff>=0.6",
   "mypy>=1.10",
@@ -47,6 +48,9 @@ gia = "issue_agent.cli:main"
 
 [tool.setuptools.package-data]
 issue_agent = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "issue_agent.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

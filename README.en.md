@@ -68,6 +68,7 @@ gia solve \
   --issue https://github.com/owner/repo/issues/123 \
   --sandbox local \
   --max-iters 3 \
+  --repair-strategy replacement \
   --run-dir .gia-runs/issue-123 \
   --out-diff fix.patch \
   --metadata-out runs.jsonl
@@ -80,6 +81,9 @@ target repository has a GitHub `origin` remote. GitHub issue refs use
 
 Use `--sandbox docker` to run validation commands in a Docker container. Local
 mode is the default and is recorded explicitly in run metadata.
+When a generic image lacks project dependencies, configure
+`sandbox.docker_setup_commands`. If installation needs network access, explicitly
+select an allowed `docker_network` instead of the default `none`.
 
 By default, `gia solve` refuses to run when the target repository has
 uncommitted changes. Pass `--allow-dirty` only when you intentionally want to
@@ -99,13 +103,17 @@ Debugging options:
 - `--base-ref REF` creates the isolated worktree from a specific ref.
 - `--keep-worktree never|on-failure|always` preserves the temporary worktree
   for inspection.
+- `--repair-strategy replacement|incremental` applies candidates independently
+  to the base revision or layers repairs on the previous candidate.
 - `--check-command CMD` overrides configured checks and can be repeated.
+- `--context-max-files` and `--context-max-chars` bound repository discovery and prompt size.
 - `--skip-checks` applies a valid patch but records `status=unchecked`; unchecked
   runs return exit code 2 so CI does not treat them as resolved.
 - `--quiet` suppresses stderr summary; `--verbose` prints progress logs.
 
-Machine-readable run metadata includes `schema_version`, `run_id`,
-`patch_provider`, `fallback_used`, and compact attempt records. Detailed
+Schema v2 metadata includes the actual `model_provider`, `model`, `model_route`,
+aggregate token usage, `patch_provider`, `fallback_used`, and compact attempt records.
+Leaderboards prefer the model that actually generated the patch. Detailed
 attempt artifacts cap and redact check stdout/stderr. When solving fails before
 metadata exists, `--run-dir` writes `error.json`; use `--error-out PATH` for an
 explicit error artifact path.
@@ -152,6 +160,8 @@ sandbox:
   docker_read_only: false
   docker_env: []
   docker_user: null
+  docker_setup_commands: []
+  docker_tmpfs: [/tmp]
 ```
 
 External fallback providers are opt-in. Keep `fallback_model: null` until you
@@ -170,15 +180,22 @@ Available config presets:
 gia bench swebench --dataset lite --cases cases.jsonl --limit 10 --predictions preds.jsonl
 gia bench korean --cases korean_cases.jsonl --out runs.jsonl
 gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --limit 10
+gia bench korean --cases korean_cases.jsonl --out runs.jsonl --solve --resume --workers 4
+gia bench swebench --dataset lite --cases cases.jsonl --predictions preds.jsonl \
+  --evaluate-command 'python -m swebench.harness.run_evaluation --predictions_path {predictions}'
 gia leaderboard --runs runs.jsonl --sort resolved_per_dollar
 ```
 
 The SWE-bench command writes prediction JSONL compatible with the official
 harness shape (`instance_id`, `model_name_or_path`, `model_patch`). It does not
 replace the official Docker evaluation harness.
+`--evaluate-command` expands `{predictions}` and `{dataset}` and invokes an installed
+official harness without shell evaluation.
 
 `gia bench korean --solve` runs each case through the local solver when a case
 includes `repo` plus one of `issue`, `issue_file`, or `issue_text`.
+`--resume` skips existing `case_id` values, while `--workers` runs independent cases
+with bounded parallelism.
 
 ## Development
 
